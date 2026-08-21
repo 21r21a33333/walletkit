@@ -61,7 +61,7 @@ Stage B — Port freeze
 Stage C — Policy engine (engine-agnostic — the `PolicyEngine` port is the reuse seam; all engines plug in behind it)
 - **Task 7:** `Decision` + `PolicyRejection` — the universal port contract every engine returns
 - **Task 8:** Native engine — `Verdict`/`Policy`/deny-over-allow `evaluate` + `SpendLimit`/`TargetAllowlist` + `DefaultPolicyEngine` (wei-exact, zero-dep, frozen default)
-- **Task 8b:** Regorus engine adapter — Rego rules + custom `U256`/address/selector builtins (feature `policy-regorus`)
+- ~~**Task 8b:** Regorus engine adapter~~ — **DROPPED 2026-08-22.** Low value between the native default (wei-exact) and the WASM host (8c), which already runs the *real* third-party engines (Fystack). Removing it avoids a heavy dep tree (regorus + anyhow + parking_lot + num-bigint). Declarative policy → WASM host.
 - **Task 8c:** WASM plugin engine (production) — wasmtime + Component Model + a WIT `policy` interface; hardened sandbox (no ambient WASI, epoch/fuel bound, `StoreLimits`), signed + hash-pinned modules, compiled-module cache (feature `policy-wasm`). Polyglot in-process plugins, `U256`-safe. **Also the "reuse Fystack" mechanism:** ship a `wasip1` `fystack.wasm` plugin (its pure eval core); the developer brings a Fystack policy JSON — **POC-gated** (confirm `expr-lang`→wasip1). MoonPay-JS later best-effort. After the Phase-1 core loop is green.
 - **Task 8d** _(Phase 3 — deferred)_ Casbin engine — RBAC/ABAC who-dimension (`casbin`, hold behind `RwLock`); needs the Phase-3 identity `PolicyContext`.
 - **Task 8e** _(Phase 3 — deferred)_ Cedar engine — structured principal/action/resource authz (`cedar-policy`); 64-bit → pairs with native/Regorus for wei via the Composite.
@@ -387,7 +387,10 @@ async fn engine_composes_allow_guard_and_default_deny() {
 
 **Port refinement forced here (applies to Task 6 + Task 8):** `PolicyEngine::evaluate` returns **`Result<Decision, WalletKitError>`**, not `Decision`. Rationale: real engines (Regorus, WASM, remote) can *fail operationally* (policy eval error, plugin trap, network) — distinct from a clean `Decision::Deny`. The caller (TxManager) treats `Err` as **fail-closed** (never sign) and may retry if the error is retryable, while `Decision::Deny` is a terminal denial. Native's impl becomes `Ok(evaluate(...))` (it never errors).
 
-### Task 8b — Regorus engine
+### Task 8b — Regorus engine — DROPPED (2026-08-22)
+
+_Skipped by decision: the native engine covers the wei-exact defaults and the WASM host (8c) reuses real declarative engines (Fystack), so a middle Rego layer wasn't worth its dependency weight. The `evaluate -> Result` fail-closed refinement below still holds (it was independent of Regorus). Original design retained below for reference._
+
 
 **Files:** Create `src/adapters/policy_regorus.rs` (feature `policy-regorus`). Adds optional dep `regorus`.
 
