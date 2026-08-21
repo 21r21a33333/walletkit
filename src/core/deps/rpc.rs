@@ -1,0 +1,21 @@
+use alloy_eips::eip1559::Eip1559Estimation;
+use alloy_primitives::{Address, Bytes, TxHash};
+use alloy_rpc_types_eth::TransactionReceipt;
+use async_trait::async_trait;
+
+/// Object-safe read/submit facade over an alloy `Provider`: exactly the chain ops
+/// the nonce/gas/submission adapters need. alloy's generic `Provider`/`Filler`
+/// types stay confined inside the concrete adapter (the `Transport` struct, Task
+/// 12) — only concrete data types cross this port.
+#[async_trait]
+pub trait Rpc: Send + Sync {
+    async fn pending_nonce(&self, account: Address) -> Result<u64, RpcError>;
+    async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError>;
+    async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError>;
+    async fn receipt(&self, tx: TxHash) -> Result<Option<TransactionReceipt>, RpcError>;
+}
+
+/// Variants grow with the transport adapter (Task 12).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RpcError {}
