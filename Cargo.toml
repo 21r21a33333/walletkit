@@ -1,0 +1,13 @@
+[package]
+name = "walletkit"
+version = "0.0.0"
+edition = "2024"
+description = "Client-side ergonomic facade over alloy for wallet infrastructure and transaction execution"
+publish = false
+
+[dependencies]
+# Deps are added per-consumer (see docs/plans): thiserror/tokio/async-trait/tracing
+# arrive with the ports and adapters that first use them, not up front.
+alloy-primitives = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
