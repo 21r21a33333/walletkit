@@ -1,3 +1,4 @@
 //! Concrete implementations of the [`core::deps`](crate::core::deps) ports.
-//! Added per-adapter (native policy, signer, RPC, gas oracle, ...) as each task
-//! lands — empty until the first adapter earns its place.
+//! One (flat) module per adapter, added as each task lands.
+
+pub mod policy;

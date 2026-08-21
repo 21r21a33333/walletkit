@@ -16,7 +16,7 @@ pub struct PolicyApproval {
 }
 
 impl PolicyApproval {
-    #[allow(dead_code)] // sole caller is the default engine (Task 8)
+    /// Minted only by the policy layer (crate-private) after an intent is allowed.
     pub(crate) fn mint(intent_hash: IntentHash) -> Self {
         Self { intent_hash }
     }
