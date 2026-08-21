@@ -62,11 +62,11 @@ Stage C — Policy engine (engine-agnostic — the `PolicyEngine` port is the re
 - **Task 7:** `Decision` + `PolicyRejection` — the universal port contract every engine returns
 - **Task 8:** Native engine — `Verdict`/`Policy`/deny-over-allow `evaluate` + `SpendLimit`/`TargetAllowlist` + `DefaultPolicyEngine` (wei-exact, zero-dep, frozen default)
 - **Task 8b:** Regorus engine adapter — Rego rules + custom `U256`/address/selector builtins (feature `policy-regorus`)
-- **Task 8c:** WASM plugin engine (production) — wasmtime + Component Model + a WIT `policy` interface; hardened sandbox (no ambient WASI, epoch/fuel bound, `StoreLimits`), signed + hash-pinned plugin modules, compiled-module cache (feature `policy-wasm`). Polyglot in-process: Go/JS/Rust/Python policy plugins, `U256`-safe. Sequenced after the Phase-1 core loop is green (no earlier consumer).
-- **Task 8d** _(Phase 3)_ Casbin engine — RBAC/ABAC who-dimension (`casbin` crate); needs the Phase-3 identity `PolicyContext`.
-- **Task 8e** _(Phase 3)_ Cedar engine — structured principal/action/resource authz (`cedar-policy`); structural-only (64-bit), pairs with native/Regorus for wei via the Composite.
-- **Task 8f** _(any phase)_ Remote engine — `tonic` gRPC (our `PolicyDecision` contract) + per-product HTTP adapters (`reqwest`, Fystack/MoonPay); host mints the approval; net error → retryable `Err`.
-- **Task 8g** _(Phase 3)_ `CompositePolicyEngine` — combine engines (what + who + custom); all-must-allow + deny-over-allow; host mints one approval.
+- **Task 8c:** WASM plugin engine (production) — wasmtime + Component Model + a WIT `policy` interface; hardened sandbox (no ambient WASI, epoch/fuel bound, `StoreLimits`), signed + hash-pinned modules, compiled-module cache (feature `policy-wasm`). Polyglot in-process plugins, `U256`-safe. **Also the "reuse Fystack" mechanism:** ship a `wasip1` `fystack.wasm` plugin (its pure eval core); the developer brings a Fystack policy JSON — **POC-gated** (confirm `expr-lang`→wasip1). MoonPay-JS later best-effort. After the Phase-1 core loop is green.
+- **Task 8d** _(Phase 3 — deferred)_ Casbin engine — RBAC/ABAC who-dimension (`casbin`, hold behind `RwLock`); needs the Phase-3 identity `PolicyContext`.
+- **Task 8e** _(Phase 3 — deferred)_ Cedar engine — structured principal/action/resource authz (`cedar-policy`); 64-bit → pairs with native/Regorus for wei via the Composite.
+- **Task 8f** _(any phase — deprioritized)_ Remote engine — Fystack/MoonPay reuse moved to 8c (WASM); Remote is now **only** for a genuine central policy *service* (`tonic` gRPC `PolicyDecision`, mTLS); host mints, net error → retryable `Err`.
+- **Task 8g** _(Phase 3 — deferred)_ `CompositePolicyEngine` — combine what + who dimensions; all-must-allow + deny-over-allow; host mints one approval.
 - **Port refinement (Phase 3):** `PolicyEngine::evaluate` input grows from `intent` to `intent + PolicyContext` (initiator/roles/auth) so the who-dimension engines have a subject; `#[non_exhaustive]` context keeps it non-breaking.
 
 Stage D — Supporting adapters
@@ -149,11 +149,13 @@ fn selector_only_for_calls_with_calldata() {
 ```
 
 **Steps:**
-- [ ] Scaffold `Cargo.toml` + module tree (empty `deps`/`adapters` placeholders)
-- [ ] Write `primitives.rs` (types above)
-- [ ] Write the two tests
-- [ ] `cargo test && cargo fmt && cargo clippy --all-targets` — green, zero warnings
-- [ ] Commit: `Scaffold crate and add intent primitives`
+- [x] Scaffold `Cargo.toml` + module tree (empty `deps`/`adapters` placeholders)
+- [x] Write `primitives.rs` (types above)
+- [x] Write the two tests
+- [x] `cargo test && cargo fmt && cargo clippy --all-targets` — green, zero warnings
+- [x] Commit: `Scaffold crate and add intent primitives`
+
+_Done 2026-08-22. Deps deferred per YAGNI: only `alloy-primitives`/`serde`/`serde_json` added; `thiserror`/`tokio`/`async-trait`/`tracing` land with their first consumer._
 
 **Cargo deps this task adds:** `alloy-primitives` (serde), `serde` (derive), `serde_json`, `thiserror`, `tokio` (sync/time/rt/macros), `async-trait`, `tracing`.
 
@@ -435,7 +437,12 @@ The wei-exactness test is the load-bearing one — it guards the `U256` builtin 
 
 **Files:** Create `wit/policy.wit` + `src/adapters/policy_wasm.rs` (feature `policy-wasm`). Adds optional deps `wasmtime` (component-model + async), `sha2` (hash-pin). Sequenced after the Phase-1 core loop is green.
 
-**Why:** run policy plugins authored in Go/JS/Rust/Python **in-process**, no sidecar. wasmtime does the compilation + sandbox; we own the typed interface + the hardening + the trust boundary.
+**Why:** run policy plugins authored in Go/JS/Rust/Python **in-process**, no sidecar. wasmtime does the compilation + sandbox; we own the typed interface + the hardening + the trust boundary. **This is also the "reuse Fystack/MoonPay" mechanism** — their policy *eval* is a pure function (no I/O), so it compiles to WASM and runs here; a developer brings their policy JSON and we run *their real engine* in-process (no service, no HTTP).
+
+**Reusing Fystack (Go) — the developer-friendly path (POC-gated):**
+- Fystack's eval core (`expr-lang`, pure Go) compiles to a `wasip1` WASM module behind our WIT `evaluate`. **walletkit ships a pre-built `fystack.wasm` plugin** (built once via `GOOS=wasip1 go build`); the developer only supplies a **Fystack policy JSON**, loaded as the plugin's config.
+- **POC gate — CLEARED ✅** (`poc/fystack-wasm/`, 2026-08-21). `expr-lang/expr` v1.17.8 compiles clean to `GOOS=wasip1` with no source changes (7 MB module); a Rust `wasmtime` host evaluates it in-process, 5/5 cases incl. the `2^256−1` wei case (U256-exact via `math/big`, since `expr` numbers are float64) and the exact spend-limit boundary. ~1.3 ms per *cold* instantiate+eval (stdio path; production `//go:wasmexport` reactor keeps the instance warm → µs). The POC uses WASI-stdio as the honest transport for the expr-lang-under-wasip1 question; production swaps in the no-WASI `//go:wasmexport` ABI + epoch/fuel + `StoreLimits` + sha256-pin (all `wasmtime` config, not the risk retired here).
+- **MoonPay (Node/Python)** — best-effort later: its JS core via Javy (QuickJS) if plain-JS; Python-WASM is limited. Fystack (Go→WASM) is the clean first case.
 
 **Security-critical design point:** the plugin returns **allow/deny only — it never mints a `PolicyApproval`.** The host mints the approval (crate-private, bound to `intent.hash()`) *after* the plugin says allow. A plugin therefore cannot forge authorization; the worst a malicious plugin does is wrongly allow/deny *its own* configured policy, never bypass the binding.
 
@@ -519,10 +526,7 @@ Phase-1 engines ignore `ctx`. This is why Casbin/Cedar are Phase 3, not preferen
 
 **Task 8e — Cedar engine** (`policy-cedar`). Wraps `cedar_policy`: parse policies → `PolicySet`; build `Request::new(principal, action, resource, context)` + `Entities`; `Authorizer::is_authorized(&req, &policies, &entities).decision() == Decision::Allow` [docs.rs/cedar-policy] (wrap in `stacker::grow` for deep policy sets). `principal = ctx identity`, `action = Send/Approve`, `resource = account/target`, `context = {chain, …}`. Structural/role authz only — **64-bit `Long`, so numeric wei guards stay native/Regorus** and combine via the Composite. Reuse `cedar-policy`. *Test:* principal permitted → Allow, forbidden → Deny.
 
-**Task 8f — Remote engine** (`policy-remote`). Two adapters behind the port:
-- `RemotePolicyEngine` — our own **gRPC** `PolicyDecision` service via `tonic`+`prost` (typed, versioned, mTLS); `evaluate` sends `(intent, ctx)` → `decision`. Timeouts/transport errors → **retryable `Err`** (fail-closed at the caller).
-- Product adapters (`reqwest`) speaking Fystack (Go) / MoonPay (Node) JSON APIs — for teams already running those services.
-Host mints the approval on a remote `allow`; the remote can't forge one.
+**Task 8f — Remote engine** (`policy-remote`, deprioritized). Fystack/MoonPay reuse **moved to the WASM host (8c)** — they're in-process libraries, so the developer-friendly path is running their eval core in WASM, not calling a service. Remote is now **only** for a genuine **central policy *service*** a team already operates: `RemotePolicyEngine` over our own **gRPC** `PolicyDecision` contract (`tonic`+`prost`, mTLS); `evaluate` sends `(intent, ctx)` → `decision`; timeouts/transport errors → **retryable `Err`** (fail-closed). Host mints the approval; the remote can't forge one. **Any-phase, build only when asked.**
 
 **Task 8g — `CompositePolicyEngine`.** `{ engines: Vec<Arc<dyn PolicyEngine>> }`. `evaluate` runs each: any `Err` → `Err` (fail-closed); any `Deny` → `Deny`; only if **all allow** → `Allow(mint(intent.hash()))` (sub-approvals discarded, one minted). This is how what-dimension (native/Regorus/WASM) and who-dimension (Casbin/Cedar) combine — e.g. `[SpendLimit-via-native, roles-via-Cedar]` must both pass.
 
