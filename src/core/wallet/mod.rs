@@ -1,5 +1,6 @@
-//! Wallet domain types.
+//! Wallet domain types. All primitives live under [`primitives`]; this module is
+//! a thin re-export surface.
 
 mod primitives;
 
-pub use primitives::{IntentHash, PolicyApproval, TxIntent};
+pub use primitives::{Decision, IntentHash, PolicyApproval, PolicyRejection, TxIntent};
