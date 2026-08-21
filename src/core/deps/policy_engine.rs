@@ -12,8 +12,17 @@ pub trait PolicyEngine: Send + Sync {
     async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError>;
 }
 
-/// Variants grow with the engines that produce them (Regorus/WASM/remote).
-/// The native engine never errors — it returns `Ok(Decision::Deny)` instead.
+/// The native engine never errors (returns `Ok(Decision::Deny)`); these variants
+/// come from engines that can fail operationally (WASM host, remote).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PolicyEngineError {}
+pub enum PolicyEngineError {
+    /// The plugin could not be loaded at construction (bad module, hash mismatch,
+    /// compile/instantiation failure).
+    #[error("failed to load policy plugin: {0}")]
+    Load(String),
+    /// Evaluation failed operationally: a trap, a resource-limit/timeout, or a
+    /// missing/malformed decision from the plugin.
+    #[error("policy evaluation failed: {0}")]
+    Eval(String),
+}
