@@ -43,6 +43,37 @@ impl TxIntent {
     }
 }
 
+/// An unforgeable, single-use authorization that a specific [`TxIntent`] passed
+/// policy. Only the policy layer can [`mint`](PolicyApproval::mint) one
+/// (crate-private) and it is deliberately not `Serialize`, so it cannot be
+/// persisted and replayed. `Signer::sign` requires one, making the policy→sign
+/// gate structural rather than conventional.
+///
+/// Kept minimal: the evaluation-context envelope (gas envelope, sim digest,
+/// validity window, policy version) grows into it at Task 17. The approval is
+/// opaque to the `Signer` port — only `authorizes`/`consume` are called — so
+/// adding fields later touches no trait contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyApproval {
+    intent_hash: IntentHash,
+}
+
+impl PolicyApproval {
+    #[allow(dead_code)] // sole caller is the default engine (Task 8)
+    pub(crate) fn mint(intent_hash: IntentHash) -> Self {
+        Self { intent_hash }
+    }
+
+    pub fn authorizes(&self, intent_hash: IntentHash) -> bool {
+        self.intent_hash == intent_hash
+    }
+
+    /// By value: single-use, so a leaked approval can't authorize twice.
+    pub fn consume(self) -> IntentHash {
+        self.intent_hash
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +148,20 @@ mod tests {
             None,
             "contract creation"
         );
+    }
+
+    #[test]
+    fn approval_authorizes_only_its_bound_intent() {
+        let bound = base().hash();
+        let other = TxIntent {
+            chain_id: 999,
+            ..base()
+        }
+        .hash();
+        let approval = PolicyApproval::mint(bound);
+
+        assert!(approval.authorizes(bound));
+        assert!(!approval.authorizes(other));
+        assert_eq!(approval.consume(), bound); // by value: single-use
     }
 }

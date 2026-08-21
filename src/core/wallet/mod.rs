@@ -2,4 +2,4 @@
 
 mod primitives;
 
-pub use primitives::{IntentHash, TxIntent};
+pub use primitives::{IntentHash, PolicyApproval, TxIntent};
