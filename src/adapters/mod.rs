@@ -4,10 +4,12 @@
 pub mod gas_oracle;
 pub mod nonce_store;
 pub mod policy;
+pub mod public_mempool;
 pub mod signers;
 pub mod transport;
 
 pub use gas_oracle::RpcGasOracle;
 pub use nonce_store::{InMemoryStateStore, LocalNonceManager};
+pub use public_mempool::PublicMempool;
 pub use signers::LocalSigner;
 pub use transport::{Transport, TransportBuilder, TransportConfig, Vendor};
