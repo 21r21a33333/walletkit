@@ -108,7 +108,7 @@ impl DefaultPolicyEngine {
 #[async_trait]
 impl PolicyEngine for DefaultPolicyEngine {
     async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError> {
-        Ok(self.decide(intent)) // native evaluation is infallible
+        Ok(self.decide(intent))
     }
 }
 

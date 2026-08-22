@@ -21,12 +21,10 @@ pub struct TxIntent {
 }
 
 impl TxIntent {
-    /// Stable content hash — the object policy/simulate/sign bind to.
-    ///
-    /// `serde_json` field order is fixed by struct declaration and these alloy
-    /// types serialize deterministically (hex strings, no maps), so the hash is
-    /// stable within a process. Phase 1 never persists it across alloy versions;
-    /// if that changes, switch to explicit `alloy_rlp` encoding.
+    /// Stable content hash policy/simulate/sign bind to. `serde_json` is
+    /// deterministic for these alloy types (fixed field order, hex strings), so the
+    /// hash is stable within a process — but it is not persisted across alloy
+    /// versions; switch to `alloy_rlp` if that ever changes.
     pub fn hash(&self) -> IntentHash {
         keccak256(serde_json::to_vec(self).expect("TxIntent is serializable"))
     }

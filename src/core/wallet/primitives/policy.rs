@@ -1,15 +1,10 @@
 use super::IntentHash;
 
-/// An unforgeable, single-use authorization that a specific
-/// [`TxIntent`](super::TxIntent) passed policy. Only the policy layer can
-/// [`mint`](PolicyApproval::mint) one (crate-private) and it is deliberately not
-/// `Serialize`, so it cannot be persisted and replayed. `Signer::sign` requires
-/// one, making the policy→sign gate structural rather than conventional.
-///
-/// Kept minimal: the evaluation-context envelope (gas envelope, sim digest,
-/// validity window, policy version) grows into it at Task 17. The approval is
-/// opaque to the `Signer` port — only `authorizes`/`consume` are called — so
-/// adding fields later touches no trait contract.
+/// Unforgeable, single-use proof that a specific [`TxIntent`](super::TxIntent)
+/// passed policy. Minted only by the policy layer (crate-private) and not
+/// `Serialize`, so it can't be persisted and replayed; `Signer::sign` requires
+/// one, making the policy→sign gate structural. Grows an evaluation-context
+/// envelope at Task 17.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyApproval {
     intent_hash: IntentHash,
@@ -31,8 +26,7 @@ impl PolicyApproval {
     }
 }
 
-/// Why an engine denied an intent. The field segment renders only when a field is
-/// named, so both "rule + field + reason" and "rule + reason" read cleanly.
+/// Why an engine denied an intent.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("policy denied by rule `{rule}`{}: {reason}", .field.as_ref().map(|f| format!(" (field `{f}`)")).unwrap_or_default())]
 pub struct PolicyRejection {
@@ -41,13 +35,9 @@ pub struct PolicyRejection {
     pub reason: String,
 }
 
-/// The verdict every policy engine returns. `Allow` carries the host-minted,
-/// single-use [`PolicyApproval`]; `Deny` carries the [`PolicyRejection`]. An
-/// operational engine failure is *not* a `Decision` — it is the `Err` arm of the
-/// port's `Result`, treated fail-closed.
-///
-/// Deliberately not `Clone`: an `Allow` holds a single-use capability that must
-/// not be duplicated.
+/// The verdict every policy engine returns; an operational failure is the port's
+/// `Err`, not a `Decision` (fail-closed). Not `Clone` — `Allow` holds a single-use
+/// capability that must not be duplicated.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Decision {
@@ -69,7 +59,7 @@ mod tests {
 
         assert!(approval.authorizes(bound));
         assert!(!approval.authorizes(other));
-        assert_eq!(approval.consume(), bound); // by value: single-use
+        assert_eq!(approval.consume(), bound);
     }
 
     #[test]

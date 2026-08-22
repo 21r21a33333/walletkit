@@ -3,10 +3,9 @@ use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, Signature};
 use async_trait::async_trait;
 
-/// Signs transactions for one account. Signature-only (no key export), and the
-/// single-use [`PolicyApproval`] must authorize exactly `intent_hash` — the signer
-/// enforces that bind, making the policy→sign gate structural rather than a
-/// convention a caller can skip.
+/// Signs transactions for one account. Signature-only (no key export); the
+/// single-use [`PolicyApproval`] must authorize exactly `intent_hash`, which the
+/// signer enforces — making the policy→sign gate structural.
 #[async_trait]
 pub trait Signer: Send + Sync {
     fn address(&self) -> Address;

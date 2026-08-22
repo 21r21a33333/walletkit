@@ -110,7 +110,6 @@ mod tests {
         let intent = B256::from([0x11; 32]);
         let other = B256::from([0x22; 32]);
 
-        // approval bound to `intent` -> signs
         assert!(
             signer
                 .sign_transaction(&tx, intent, PolicyApproval::mint(intent))
@@ -118,7 +117,6 @@ mod tests {
                 .is_ok()
         );
 
-        // approval bound to a different intent -> the gate trips
         assert!(matches!(
             signer
                 .sign_transaction(&tx, intent, PolicyApproval::mint(other))
