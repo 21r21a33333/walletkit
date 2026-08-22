@@ -1,4 +1,5 @@
 use crate::core::wallet::{NonceScope, NonceState, TxHandle};
+use alloy_primitives::Address;
 use async_trait::async_trait;
 
 /// A stored value together with its compare-and-swap version. Version `0` means
@@ -32,6 +33,10 @@ pub trait StateStore: Send + Sync {
     /// Persist a handle before its broadcast (persist-before-broadcast, so a crash
     /// is recoverable). Overwrites by [`id`](TxHandle::id).
     async fn put_handle(&self, handle: &TxHandle) -> Result<(), StateStoreError>;
+
+    /// Non-terminal handles for `account`, for the executor to recover/track. The
+    /// crash-recovery read: on boot these are the in-flight txs to rebroadcast.
+    async fn pending_handles(&self, account: Address) -> Result<Vec<TxHandle>, StateStoreError>;
 }
 
 /// Variants grow with the store adapters (the in-memory store never errors; a

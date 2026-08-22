@@ -1,5 +1,5 @@
 use super::IntentHash;
-use alloy_primitives::{B256, TxHash, keccak256};
+use alloy_primitives::{Address, B256, Bytes, TxHash, keccak256};
 
 /// Stable, queryable id for a tracked transaction — derived from intent + nonce so
 /// it survives gas bumps (OZ `transactionId` / thirdweb `queueId` model).
@@ -25,13 +25,17 @@ pub enum TxStatus {
 }
 
 /// Stable, persisted handle to a submitted transaction — the queryable unit a
-/// caller tracks. `broadcasts` holds the original and (Task 17) each bump, so the
-/// mined hash distinguishes ours from a replacement.
+/// caller tracks, and the crash-recovery WAL record. `signed` is the latest signed
+/// tx (persisted before broadcast so the executor can rebroadcast it verbatim);
+/// `broadcasts` holds the original and (Task 17) each bump hash, so the mined hash
+/// distinguishes ours from a replacement.
 #[derive(Debug, Clone)]
 pub struct TxHandle {
     pub id: HandleId,
+    pub account: Address,
     pub intent_hash: IntentHash,
     pub nonce: u64,
     pub status: TxStatus,
+    pub signed: Bytes,
     pub broadcasts: Vec<TxHash>,
 }

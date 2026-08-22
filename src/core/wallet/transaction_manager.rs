@@ -149,12 +149,15 @@ impl TransactionManager {
 
         let mut handle = TxHandle {
             id: HandleId::new(intent_hash, nonce),
+            account: intent.account,
             intent_hash,
             nonce,
             status: TxStatus::Pending,
+            signed: rlp.clone(),
             broadcasts: vec![tx_hash],
         };
-        // Persist before broadcast so a crash between submit and ack is recoverable.
+        // Persist the signed tx before broadcast (WAL): a crash between submit and ack
+        // is then recoverable by rebroadcasting `signed`.
         self.state_store.put_handle(&handle).await?;
         self.submission.submit(rlp).await?;
         handle.status = TxStatus::Sent;
@@ -164,6 +167,40 @@ impl TransactionManager {
     fn buffered_gas(&self, estimate: u64) -> u64 {
         let buffered = (estimate as u128).saturating_mul(100 + self.gas_buffer_pct) / 100;
         buffered.min(u64::MAX as u128) as u64
+    }
+}
+
+/// Per-account tracking executor (thirdweb engine-core pattern): the nonce is
+/// per-account, so one executor serializes an account's in-flight txs. The host
+/// drives `tick` on a `Clock` cadence; `tick` runs Recover → Confirm → Send.
+/// Phase 17a implements Recover.
+pub struct AccountExecutor {
+    submission: Arc<dyn SubmissionStrategy>,
+    state_store: Arc<dyn StateStore>,
+    account: Address,
+}
+
+impl AccountExecutor {
+    pub fn new(
+        submission: Arc<dyn SubmissionStrategy>,
+        state_store: Arc<dyn StateStore>,
+        account: Address,
+    ) -> Self {
+        Self {
+            submission,
+            state_store,
+            account,
+        }
+    }
+
+    /// Rebroadcast every persisted in-flight tx for the account. Idempotent — an
+    /// already-known or already-mined tx is reconciled by Confirm — so a per-handle
+    /// submit failure is skipped; only a store read failure aborts the cycle.
+    pub async fn recover(&self) -> Result<(), TransactionManagerError> {
+        for handle in self.state_store.pending_handles(self.account).await? {
+            let _ = self.submission.submit(handle.signed.clone()).await;
+        }
+        Ok(())
     }
 }
 
@@ -198,7 +235,7 @@ mod tests {
     use crate::core::deps::Versioned;
     use crate::core::wallet::{NonceScope, NonceState};
     use alloy_consensus::TxEip1559;
-    use alloy_primitives::{Address, Signature, TxHash, TxKind, U256, address};
+    use alloy_primitives::{Address, B256, Signature, TxHash, TxKind, U256, address};
     use alloy_rpc_types_eth::TransactionReceipt;
     use async_trait::async_trait;
     use std::sync::Mutex;
@@ -365,6 +402,9 @@ mod tests {
         ) -> Result<bool, StateStoreError> {
             unreachable!()
         }
+        async fn pending_handles(&self, _: Address) -> Result<Vec<TxHandle>, StateStoreError> {
+            unreachable!()
+        }
     }
 
     fn intent() -> TxIntent {
@@ -472,5 +512,68 @@ mod tests {
         ));
         let seen = l.lock().unwrap();
         assert!(seen.contains(&"allocate") && seen.contains(&"release"));
+    }
+
+    /// Store seeded as if a prior run had persisted an in-flight tx.
+    struct SeededStore {
+        handles: Vec<TxHandle>,
+    }
+    #[async_trait]
+    impl StateStore for SeededStore {
+        async fn pending_handles(&self, _: Address) -> Result<Vec<TxHandle>, StateStoreError> {
+            Ok(self.handles.clone())
+        }
+        async fn put_handle(&self, _: &TxHandle) -> Result<(), StateStoreError> {
+            unreachable!()
+        }
+        async fn load_nonce_state(
+            &self,
+            _: NonceScope,
+        ) -> Result<Versioned<NonceState>, StateStoreError> {
+            unreachable!()
+        }
+        async fn cas_nonce_state(
+            &self,
+            _: NonceScope,
+            _: u64,
+            _: &NonceState,
+        ) -> Result<bool, StateStoreError> {
+            unreachable!()
+        }
+    }
+
+    struct RecordingSubmit {
+        seen: Arc<Mutex<Vec<Bytes>>>,
+    }
+    #[async_trait]
+    impl SubmissionStrategy for RecordingSubmit {
+        async fn submit(&self, rlp: Bytes) -> Result<TxHash, SubmissionError> {
+            self.seen.lock().unwrap().push(rlp);
+            Ok(TxHash::ZERO)
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_rebroadcasts_persisted_inflight_after_restart() {
+        let signed = Bytes::from_static(&[1, 2, 3]);
+        let handle = TxHandle {
+            id: HandleId::new(B256::ZERO, 4),
+            account: Address::ZERO,
+            intent_hash: B256::ZERO,
+            nonce: 4,
+            status: TxStatus::Sent,
+            signed: signed.clone(),
+            broadcasts: vec![TxHash::ZERO],
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let exec = AccountExecutor::new(
+            Arc::new(RecordingSubmit { seen: seen.clone() }),
+            Arc::new(SeededStore {
+                handles: vec![handle],
+            }),
+            Address::ZERO,
+        );
+        exec.recover().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![signed]); // the persisted signed tx, verbatim
     }
 }

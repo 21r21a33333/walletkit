@@ -8,4 +8,4 @@ pub use primitives::{
     Decision, HandleId, IntentHash, NonceLane, NonceScope, NonceState, PolicyApproval,
     PolicyRejection, TxHandle, TxIntent, TxStatus,
 };
-pub use transaction_manager::{TransactionManager, TransactionManagerError};
+pub use transaction_manager::{AccountExecutor, TransactionManager, TransactionManagerError};

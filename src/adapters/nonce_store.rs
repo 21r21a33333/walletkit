@@ -82,6 +82,18 @@ impl StateStore for InMemoryStateStore {
             .insert(handle.id, handle.clone());
         Ok(())
     }
+
+    async fn pending_handles(&self, account: Address) -> Result<Vec<TxHandle>, StateStoreError> {
+        // Terminal statuses are filtered here once the Confirm phase adds them.
+        Ok(self
+            .handles
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|h| h.account == account)
+            .cloned()
+            .collect())
+    }
 }
 
 pub struct LocalNonceManager {
