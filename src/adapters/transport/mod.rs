@@ -22,6 +22,7 @@ pub use build::{TransportBuilder, TransportConfig};
 pub use chains::{Vendor, public_rpcs, refresh_public_endpoints, vendor_url};
 
 use crate::core::deps::{Rpc, RpcError};
+use alloy_eips::BlockId;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, Bytes, TxHash};
 use alloy_provider::{DynProvider, Provider};
@@ -45,6 +46,19 @@ impl Rpc for Transport {
 
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
         self.provider.estimate_eip1559_fees().await.map_err(rpc_err)
+    }
+
+    async fn base_fee(&self) -> Result<u128, RpcError> {
+        let block = self
+            .provider
+            .get_block(BlockId::latest())
+            .await
+            .map_err(rpc_err)?
+            .ok_or_else(|| RpcError::Call {
+                transient: true,
+                message: "latest block unavailable".into(),
+            })?;
+        Ok(block.header.base_fee_per_gas.unwrap_or_default() as u128)
     }
 
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError> {

@@ -167,6 +167,9 @@ mod tests {
         async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
             unreachable!("not used by nonce tests")
         }
+        async fn base_fee(&self) -> Result<u128, RpcError> {
+            unreachable!("not used by nonce tests")
+        }
         async fn send_raw(&self, _rlp: Bytes) -> Result<TxHash, RpcError> {
             unreachable!("not used by nonce tests")
         }
