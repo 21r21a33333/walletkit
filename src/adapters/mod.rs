@@ -3,5 +3,7 @@
 
 pub mod nonce_store;
 pub mod policy;
+pub mod signers;
 
 pub use nonce_store::{InMemoryStateStore, LocalNonceManager};
+pub use signers::LocalSigner;
