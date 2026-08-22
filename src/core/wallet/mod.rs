@@ -3,4 +3,7 @@
 
 mod primitives;
 
-pub use primitives::{Decision, IntentHash, PolicyApproval, PolicyRejection, TxIntent};
+pub use primitives::{
+    Decision, IntentHash, NonceLane, NonceScope, NonceState, PolicyApproval, PolicyRejection,
+    TxIntent,
+};

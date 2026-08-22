@@ -26,4 +26,4 @@ wasmtime-wasi = { version = "36", optional = true }
 policy-moonpay = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:time"]
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["macros", "rt"] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread"] }

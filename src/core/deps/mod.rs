@@ -20,5 +20,5 @@ pub use nonce_manager::{NonceManager, NonceManagerError};
 pub use policy_engine::{PolicyEngine, PolicyEngineError};
 pub use rpc::{Rpc, RpcError};
 pub use signer::{Signer, SignerError};
-pub use state_store::{StateStore, StateStoreError};
+pub use state_store::{StateStore, StateStoreError, Versioned};
 pub use submission::{SubmissionError, SubmissionStrategy};
