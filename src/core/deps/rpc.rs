@@ -15,7 +15,11 @@ pub trait Rpc: Send + Sync {
     async fn receipt(&self, tx: TxHash) -> Result<Option<TransactionReceipt>, RpcError>;
 }
 
-/// Variants grow with the transport adapter (Task 12).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum RpcError {}
+pub enum RpcError {
+    /// An RPC call failed. `transient` (network/timeout/5xx/rate-limit) → the caller
+    /// may retry; otherwise it is a terminal JSON-RPC or method error.
+    #[error("rpc call failed: {message}")]
+    Call { message: String, transient: bool },
+}

@@ -11,9 +11,13 @@ alloy-eips = "2.4.1"
 # Deps are added per-consumer (see docs/plans): thiserror/tokio/async-trait/tracing
 # arrive with the ports and adapters that first use them, not up front.
 alloy-primitives = { version = "1", features = ["serde"] }
+alloy-provider = "2.4.1"
+alloy-rpc-client = "2.4.1"
 alloy-rpc-types-eth = "2.4.1"
 alloy-signer = "2.4.1"
 alloy-signer-local = { version = "2.4.1", features = ["keystore", "mnemonic"] }
+alloy-transport = { version = "2.4.1", features = ["throttle"] }
+alloy-transport-http = { version = "2.4.1", features = ["reqwest"] }
 async-trait = "0.1.92"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,6 +25,8 @@ thiserror = "2.0.20"
 # policy-moonpay (opt-in): the OWS executable runs as a wasip1 plugin; wasmtime is
 # heavy (cranelift), so it's gated. time parses OWS `expires_at` timestamps.
 time = { version = "0.3", features = ["parsing"], optional = true }
+tower = "0.5.3"
+url = { version = "2.5.8", features = ["serde"] }
 wasmtime = { version = "36", optional = true }
 wasmtime-wasi = { version = "36", optional = true }
 zeroize = "1.9.0"
