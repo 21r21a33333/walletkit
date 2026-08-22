@@ -1,4 +1,4 @@
-use crate::core::wallet::{NonceScope, NonceState};
+use crate::core::wallet::{NonceScope, NonceState, TxHandle};
 use async_trait::async_trait;
 
 /// A stored value together with its compare-and-swap version. Version `0` means
@@ -28,6 +28,10 @@ pub trait StateStore: Send + Sync {
         expected_version: u64,
         state: &NonceState,
     ) -> Result<bool, StateStoreError>;
+
+    /// Persist a handle before its broadcast (persist-before-broadcast, so a crash
+    /// is recoverable). Overwrites by [`id`](TxHandle::id).
+    async fn put_handle(&self, handle: &TxHandle) -> Result<(), StateStoreError>;
 }
 
 /// Variants grow with the store adapters (the in-memory store never errors; a

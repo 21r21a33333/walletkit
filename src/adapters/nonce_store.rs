@@ -25,16 +25,18 @@
 use crate::core::deps::{
     NonceManager, NonceManagerError, Rpc, StateStore, StateStoreError, Versioned,
 };
-use crate::core::wallet::{NonceScope, NonceState};
+use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
 use alloy_primitives::Address;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// In-memory CAS store: a versioned map of `scope -> nonce state`.
+/// In-memory store: a versioned map of `scope -> nonce state` plus persisted
+/// handles. Non-durable, so recovery is single-run (see the module docs).
 #[derive(Default)]
 pub struct InMemoryStateStore {
-    map: Mutex<HashMap<NonceScope, Versioned<NonceState>>>,
+    nonces: Mutex<HashMap<NonceScope, Versioned<NonceState>>>,
+    handles: Mutex<HashMap<HandleId, TxHandle>>,
 }
 
 #[async_trait]
@@ -44,7 +46,7 @@ impl StateStore for InMemoryStateStore {
         scope: NonceScope,
     ) -> Result<Versioned<NonceState>, StateStoreError> {
         Ok(self
-            .map
+            .nonces
             .lock()
             .unwrap()
             .get(&scope)
@@ -58,12 +60,12 @@ impl StateStore for InMemoryStateStore {
         expected_version: u64,
         state: &NonceState,
     ) -> Result<bool, StateStoreError> {
-        let mut map = self.map.lock().unwrap();
-        let current = map.get(&scope).map_or(0, |v| v.version);
+        let mut nonces = self.nonces.lock().unwrap();
+        let current = nonces.get(&scope).map_or(0, |v| v.version);
         if current != expected_version {
             return Ok(false);
         }
-        map.insert(
+        nonces.insert(
             scope,
             Versioned {
                 value: state.clone(),
@@ -71,6 +73,14 @@ impl StateStore for InMemoryStateStore {
             },
         );
         Ok(true)
+    }
+
+    async fn put_handle(&self, handle: &TxHandle) -> Result<(), StateStoreError> {
+        self.handles
+            .lock()
+            .unwrap()
+            .insert(handle.id, handle.clone());
+        Ok(())
     }
 }
 
@@ -152,7 +162,7 @@ mod tests {
     use crate::core::deps::RpcError;
     use alloy_eips::eip1559::Eip1559Estimation;
     use alloy_primitives::{Bytes, TxHash};
-    use alloy_rpc_types_eth::TransactionReceipt;
+    use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 
     /// Fixed pending-nonce source; the other RPC ops are never hit by these tests.
     struct FakeRpc {
@@ -168,6 +178,9 @@ mod tests {
             unreachable!("not used by nonce tests")
         }
         async fn base_fee(&self) -> Result<u128, RpcError> {
+            unreachable!("not used by nonce tests")
+        }
+        async fn estimate_gas(&self, _: &TransactionRequest) -> Result<u64, RpcError> {
             unreachable!("not used by nonce tests")
         }
         async fn send_raw(&self, _rlp: Bytes) -> Result<TxHash, RpcError> {

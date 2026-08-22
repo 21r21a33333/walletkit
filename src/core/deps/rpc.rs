@@ -1,6 +1,6 @@
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, Bytes, TxHash};
-use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
 
 /// Object-safe read/submit facade over an alloy `Provider`: exactly the chain ops
@@ -13,6 +13,9 @@ pub trait Rpc: Send + Sync {
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError>;
     /// Base fee of the latest block (0 on pre-1559 chains).
     async fn base_fee(&self) -> Result<u128, RpcError>;
+    /// `eth_estimateGas` — minimal sufficient gas (no end buffer; callers add drift).
+    /// Executes the tx, so a deterministic `Err` also means it would revert.
+    async fn estimate_gas(&self, request: &TransactionRequest) -> Result<u64, RpcError>;
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError>;
     async fn receipt(&self, tx: TxHash) -> Result<Option<TransactionReceipt>, RpcError>;
 }

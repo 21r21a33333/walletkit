@@ -26,7 +26,7 @@ use alloy_eips::BlockId;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, Bytes, TxHash};
 use alloy_provider::{DynProvider, Provider};
-use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use alloy_transport::{RpcError as AlloyRpcError, TransportError};
 use async_trait::async_trait;
 
@@ -59,6 +59,13 @@ impl Rpc for Transport {
                 message: "latest block unavailable".into(),
             })?;
         Ok(block.header.base_fee_per_gas.unwrap_or_default() as u128)
+    }
+
+    async fn estimate_gas(&self, request: &TransactionRequest) -> Result<u64, RpcError> {
+        self.provider
+            .estimate_gas(request.clone())
+            .await
+            .map_err(rpc_err)
     }
 
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError> {

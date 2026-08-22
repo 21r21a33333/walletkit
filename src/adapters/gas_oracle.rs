@@ -70,7 +70,7 @@ mod tests {
     use super::*;
     use crate::core::deps::RpcError;
     use alloy_primitives::{Address, Bytes, TxHash};
-    use alloy_rpc_types_eth::TransactionReceipt;
+    use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 
     /// Only `base_fee` is exercised by `bump`.
     struct FakeRpc {
@@ -86,6 +86,9 @@ mod tests {
             unreachable!()
         }
         async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
+            unreachable!()
+        }
+        async fn estimate_gas(&self, _: &TransactionRequest) -> Result<u64, RpcError> {
             unreachable!()
         }
         async fn send_raw(&self, _: Bytes) -> Result<TxHash, RpcError> {

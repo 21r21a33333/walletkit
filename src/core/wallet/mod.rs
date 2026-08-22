@@ -2,8 +2,10 @@
 //! a thin re-export surface.
 
 mod primitives;
+mod transaction_manager;
 
 pub use primitives::{
-    Decision, IntentHash, NonceLane, NonceScope, NonceState, PolicyApproval, PolicyRejection,
-    TxIntent,
+    Decision, HandleId, IntentHash, NonceLane, NonceScope, NonceState, PolicyApproval,
+    PolicyRejection, TxHandle, TxIntent, TxStatus,
 };
+pub use transaction_manager::{TransactionManager, TransactionManagerError};
