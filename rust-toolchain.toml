@@ -1,0 +1,5 @@
+# Pins the toolchain contributors and CI use. The crate's supported floor (MSRV) is
+# `rust-version` in Cargo.toml; this pins the *development* toolchain to current stable.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
