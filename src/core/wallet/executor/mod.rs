@@ -46,7 +46,7 @@ struct Cycle {
 /// Per-account tracking executor (thirdweb engine-core pattern): the nonce is
 /// per-account, so one executor serializes an account's in-flight txs. The host
 /// drives [`tick`](Self::tick) on a `Clock` cadence; each tick runs
-/// Recover → Confirm → Send.
+/// Recover → Confirm → Escalate.
 pub struct AccountExecutor {
     rpc: Arc<dyn Rpc>,
     nonce_manager: Arc<dyn NonceManager>,
@@ -129,7 +129,7 @@ impl AccountExecutor {
     pub async fn tick(&self) -> Result<(), ExecutorError> {
         self.recover().await?;
         self.confirm().await?;
-        self.send().await
+        self.escalate().await
     }
 
     /// Rebroadcast persisted txs that should be in the mempool (Pending/Sent).
@@ -245,7 +245,7 @@ impl AccountExecutor {
     /// the **same nonce** (RBF). Everything a bump needs comes from the persisted
     /// handle (only the approval is a cache). Best-effort per handle — one failure
     /// doesn't abort the cycle.
-    pub async fn send(&self) -> Result<(), ExecutorError> {
+    pub async fn escalate(&self) -> Result<(), ExecutorError> {
         let now = self.clock.now_unix();
         for mut handle in self.state_store.pending_handles(self.account).await? {
             let stuck = matches!(handle.status, TxStatus::Sent)
@@ -611,7 +611,7 @@ mod tests {
     async fn bump_within_envelope_reuses_approval() {
         let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
         seed_and_track(&exec, &store, GasEnvelope::DEFAULT).await; // wide -> 200 admitted
-        exec.send().await.unwrap();
+        exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2); // original + bump
         assert_eq!(*policy.calls.lock(), 0); // approval reused, no re-policy
     }
@@ -626,7 +626,7 @@ mod tests {
             max_priority_cap: 150,
         };
         seed_and_track(&exec, &store, tight).await; // 200 > 150 -> stop
-        exec.send().await.unwrap();
+        exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 1);
         assert_eq!(*policy.calls.lock(), 0);
     }
@@ -642,7 +642,7 @@ mod tests {
             h.id,
             PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, 0),
         );
-        exec.send().await.unwrap();
+        exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2); // bumped
         assert_eq!(*policy.calls.lock(), 1); // refreshed (was expired), not reused
     }
@@ -651,7 +651,7 @@ mod tests {
     async fn bump_stops_at_gas_ceiling() {
         let (exec, store, policy) = send_setup(None); // gas oracle at ceiling
         seed_and_track(&exec, &store, GasEnvelope::DEFAULT).await;
-        exec.send().await.unwrap();
+        exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 1); // no new broadcast
         assert_eq!(*policy.calls.lock(), 0);
     }
@@ -684,7 +684,7 @@ mod tests {
             h.id,
             PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
         );
-        exec.send().await.unwrap();
+        exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2);
     }
 
@@ -712,7 +712,7 @@ mod tests {
             h.id,
             PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
         );
-        exec.send().await.unwrap();
+        exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 1); // aborted, no bump
     }
 }
