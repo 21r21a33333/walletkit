@@ -395,6 +395,101 @@ mod tests {
         assert_eq!(*submit.seen.lock(), vec![h.signed]);
     }
 
+    #[tokio::test]
+    async fn recover_rebroadcasts_only_pending_and_sent_across_multiple_inflight_handles() {
+        // recover()'s `matches!(status, Pending | Sent)` guard rebroadcasts exactly the
+        // live handles; Mined/Replacing are Confirm's job (rebroadcasting them only earns
+        // a nonce-too-low). Distinct signed bytes per nonce make the set falsifiable.
+        let store = Arc::new(MockStore::default());
+        let h4 = handle(4, TxStatus::Sent);
+        let h5 = handle(5, TxStatus::Pending);
+        store.put_handle(&h4).await.unwrap();
+        store.put_handle(&h5).await.unwrap();
+        store
+            .put_handle(&handle(
+                6,
+                TxStatus::Mined {
+                    block: 8,
+                    block_hash: B256::repeat_byte(1),
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .put_handle(&handle(7, TxStatus::Replacing { since_block: 8 }))
+            .await
+            .unwrap();
+        let submit = Arc::new(MockSubmit::default());
+        let exec = Harness::default()
+            .submit(submit.clone())
+            .store(store.clone())
+            .executor();
+
+        exec.recover().await.unwrap();
+
+        let seen = submit.seen.lock();
+        assert_eq!(seen.len(), 2); // only the two live handles
+        assert!(seen.contains(&h4.signed));
+        assert!(seen.contains(&h5.signed));
+    }
+
+    #[tokio::test]
+    async fn recover_swallows_a_per_handle_submit_failure_and_still_attempts_later_handles() {
+        // The `let _ =` on the per-handle submit result must not abort recovery for the
+        // rest. Every submit errors (non-transient), but the mock records each attempt.
+        let store = Arc::new(MockStore::default());
+        let h4 = handle(4, TxStatus::Sent);
+        let h5 = handle(5, TxStatus::Sent);
+        store.put_handle(&h4).await.unwrap();
+        store.put_handle(&h5).await.unwrap();
+        let submit = Arc::new(MockSubmit {
+            outcome: Submit::Deterministic,
+            ..Default::default()
+        });
+        let exec = Harness::default()
+            .submit(submit.clone())
+            .store(store.clone())
+            .executor();
+
+        assert!(exec.recover().await.is_ok()); // the first handle's error did not abort
+        let seen = submit.seen.lock();
+        assert_eq!(seen.len(), 2); // both attempted despite the first erroring
+        assert!(seen.contains(&h4.signed));
+        assert!(seen.contains(&h5.signed));
+    }
+
+    #[tokio::test]
+    async fn terminal_handles_are_readable_after_restart_but_not_rebroadcast() {
+        // Terminal handles are excluded from the pending set (not re-tracked); only the
+        // live Sent handle is rebroadcast on recovery. Fails if any terminal variant leaks.
+        let store = Arc::new(MockStore::default());
+        store
+            .put_handle(&handle(4, TxStatus::Confirmed { block: 8 }))
+            .await
+            .unwrap();
+        store
+            .put_handle(&handle(5, TxStatus::Failed { reason: "x".into() }))
+            .await
+            .unwrap();
+        store
+            .put_handle(&handle(6, TxStatus::Replaced))
+            .await
+            .unwrap();
+        let live = handle(7, TxStatus::Sent);
+        store.put_handle(&live).await.unwrap();
+        let submit = Arc::new(MockSubmit::default());
+        let exec = Harness::default()
+            .submit(submit.clone())
+            .store(store.clone())
+            .executor();
+
+        exec.recover().await.unwrap();
+
+        let seen = submit.seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], live.signed);
+    }
+
     /// Run one confirm cycle against a fixed chain view. `canonical` is the hash
     /// `block_hash(_)` returns, so a receipt anchors only when it matches. Depth mode
     /// (no `finalized` tag), `confirmations` required.

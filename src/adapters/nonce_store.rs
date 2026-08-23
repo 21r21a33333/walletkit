@@ -224,6 +224,41 @@ mod tests {
         assert_eq!(m.allocate(a).await.unwrap(), 11);
     }
 
+    #[tokio::test]
+    async fn reset_retains_high_freed_nonce_and_drops_consumed_freed() {
+        // reset() drops freed nonces the chain already consumed but keeps those at or
+        // above the chain's next — the `>=` boundary, not `>`. The at-boundary element
+        // (75) is what distinguishes the two; the plain fixtures elsewhere can't.
+        use std::collections::BTreeSet;
+        let store = Arc::new(InMemoryStateStore::default());
+        let m = LocalNonceManager::new(
+            store.clone(),
+            Arc::new(MockRpc {
+                pending_nonce: 0,
+                ..Default::default()
+            }),
+        );
+        let a = Address::ZERO;
+        let scope = NonceScope::eoa(a);
+        let seeded = NonceState {
+            next: 100,
+            free: BTreeSet::from([74, 75, 150]),
+        };
+        assert!(store.cas_nonce_state(scope, 0, &seeded).await.unwrap());
+
+        m.reset(a, 75).await.unwrap();
+
+        let after = store.load_nonce_state(scope).await.unwrap().value;
+        assert_eq!(after.next, 100); // max(100, 75) — forward only
+        assert_eq!(after.free, BTreeSet::from([75, 150])); // 74 dropped, 75 kept (>=), 150 kept
+
+        // Recycle lowest-first across the reset boundary, then fresh from `next`.
+        assert_eq!(m.allocate(a).await.unwrap(), 75);
+        assert_eq!(m.allocate(a).await.unwrap(), 150);
+        assert_eq!(m.allocate(a).await.unwrap(), 100);
+        assert_eq!(m.allocate(a).await.unwrap(), 101);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_allocations_never_duplicate() {
         let m = Arc::new(manager(5));

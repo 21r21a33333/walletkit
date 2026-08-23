@@ -352,4 +352,38 @@ mod tests {
         assert_eq!(handle.status, TxStatus::Sent);
         assert!(!l.lock().contains(&"release"));
     }
+
+    #[tokio::test]
+    async fn sign_failure_recycles_the_nonce_so_the_next_send_reuses_it() {
+        // A pre-broadcast sign failure must release the allocated nonce, so the next send
+        // reuses it with no gap. Proven end-to-end against the real allocator + a shared
+        // store (only the signer differs): without the release branch the retry would
+        // allocate 6, not 5.
+        use crate::adapters::{InMemoryStateStore, LocalNonceManager};
+        let store = Arc::new(InMemoryStateStore::default());
+        let rpc = Arc::new(MockRpc {
+            pending_nonce: 5,
+            ..Default::default()
+        });
+        let nonce = Arc::new(LocalNonceManager::new(store.clone(), rpc.clone()));
+        let build = |sign_ok: bool| {
+            Harness::default()
+                .rpc(rpc.clone())
+                .nonce(nonce.clone())
+                .store(store.clone())
+                .signer(Arc::new(MockSigner {
+                    ok: sign_ok,
+                    ..Default::default()
+                }))
+                .manager()
+        };
+
+        // First send: sign fails after allocating nonce 5 -> release it.
+        let failed = build(false).send(&intent()).await;
+        assert!(matches!(failed, Err(TransactionManagerError::Signer(_))));
+
+        // Second send: the freed nonce 5 is reused (no gap), not 6.
+        let recovered = build(true).send(&intent()).await.unwrap();
+        assert_eq!(recovered.nonce, 5);
+    }
 }
