@@ -25,6 +25,7 @@ use alloy_rpc_types_eth::TransactionReceipt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Confirmation depth before a mined tx is treated as final. OZ uses 12 for mainnet;
 /// L2s want fewer. Per-chain, tunable via [`AccountExecutor::with_confirmations`].
@@ -48,6 +49,14 @@ struct TrackedTx {
     last_broadcast_at: u64,
 }
 
+/// The single consistent chain snapshot a confirm cycle works from — read once up
+/// front so every per-handle decision uses the same view and finality rule.
+struct Cycle {
+    view: ChainView,
+    finality: FinalityConfig,
+    mined_nonce: u64,
+}
+
 /// Per-account tracking executor (thirdweb engine-core pattern): the nonce is
 /// per-account, so one executor serializes an account's in-flight txs. The host
 /// drives [`tick`](Self::tick) on a `Clock` cadence; each tick runs
@@ -65,6 +74,9 @@ pub struct AccountExecutor {
     required_confirmations: u64,
     bump_timeout: u64,
     tracking: Mutex<HashMap<HandleId, TrackedTx>>,
+    /// Highest `latest` block seen; a lower reading next cycle is a lagging node and
+    /// the cycle is skipped (a stale head must not drive transitions).
+    last_latest: AtomicU64,
 }
 
 impl AccountExecutor {
@@ -100,6 +112,7 @@ impl AccountExecutor {
             required_confirmations: DEFAULT_REQUIRED_CONFIRMATIONS,
             bump_timeout: DEFAULT_BUMP_TIMEOUT_SECS,
             tracking: Mutex::new(HashMap::new()),
+            last_latest: AtomicU64::new(0),
         }
     }
 
@@ -161,22 +174,26 @@ impl AccountExecutor {
         Ok(())
     }
 
-    /// Classify in-flight handles by nonce progression: once the account's mined
-    /// nonce passes a handle's nonce, the receipt says mined/confirmed/failed, and a
-    /// nonce consumed by a hash that isn't ours means it was replaced.
+    /// Advance in-flight handles against one consistent chain view: reconcile the nonce
+    /// forward, then move each handle by the pure [`transition`]. Every unreliable read
+    /// collapses to [`ChainEvent::Unknown`] (per handle) or a skipped cycle (bad view),
+    /// so a wrong read can neither advance nor rewind the lifecycle.
     pub async fn confirm(&self) -> Result<(), TransactionManagerError> {
-        let mined = self.rpc.tx_count(self.account).await?;
-        let head = self.rpc.block_number().await?;
+        let Some(cycle) = self.read_cycle().await? else {
+            return Ok(()); // stale/inconsistent head — skip the whole cycle
+        };
         // Reconcile the allocator forward — a foreign/out-of-band tx can advance the
         // chain nonce without our allocation.
-        self.nonce_manager.reset(self.account, mined).await?;
+        self.nonce_manager
+            .reset(self.account, cycle.mined_nonce)
+            .await?;
         for mut handle in self.state_store.pending_handles(self.account).await? {
-            // Per-handle failures are non-fatal: a transient receipt read on one handle
-            // must not block confirming/bumping the rest (matches recover()/send()).
-            let Ok(Some(status)) = self.classify(&handle, mined, head).await else {
+            let event = self.event_for(&handle, cycle.mined_nonce).await;
+            let Some(next) = transition(&handle.status, &event, &cycle.view, &cycle.finality)
+            else {
                 continue;
             };
-            handle.status = status;
+            handle.status = next;
             // A terminal handle no longer needs its in-memory bump state.
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
                 self.tracking.lock().remove(&handle.id);
@@ -185,76 +202,72 @@ impl AccountExecutor {
         Ok(())
     }
 
-    /// The next status for one handle, or `None` to leave it unchanged. Only outcomes
-    /// at `required_confirmations` depth are terminal; shallower ones stay trackable so
-    /// a reorg can recover them.
-    async fn classify(
-        &self,
-        handle: &TxHandle,
-        mined: u64,
-        head: u64,
-    ) -> Result<Option<TxStatus>, TransactionManagerError> {
-        if handle.nonce >= mined {
-            // Nonce not consumed on-chain. A reorg that un-mined/un-replaced it frees the
-            // nonce, so a tentative Mined/Replacing handle goes back to Sent for rebroadcast.
-            return Ok(matches!(
-                handle.status,
-                TxStatus::Mined { .. } | TxStatus::Replacing { .. }
-            )
-            .then_some(TxStatus::Sent));
+    /// Read one consistent [`Cycle`] snapshot and resolve its finality rule: prefer the
+    /// `finalized` tag, fall back to a depth count when the chain lacks it. Returns
+    /// `None` — skip the cycle — when the head regressed since last cycle or `finalized`
+    /// is above `latest`, both signs of a stale/lagging node.
+    async fn read_cycle(&self) -> Result<Option<Cycle>, TransactionManagerError> {
+        let latest = self.rpc.block_number().await?;
+        let mined_nonce = self.rpc.tx_count(self.account).await?;
+        if latest < self.last_latest.load(Ordering::Relaxed) {
+            return Ok(None);
         }
-        match self.our_receipt(handle).await? {
-            Some(r) => {
-                let block = r.block_number.unwrap_or(head);
-                let block_hash = r.block_hash.unwrap_or_default();
-                // Re-mined in a different block than last seen -> reorg, re-track from Sent.
-                if let TxStatus::Mined {
-                    block_hash: prev, ..
-                } = handle.status
-                    && prev != block_hash
-                {
-                    return Ok(Some(TxStatus::Sent));
-                }
-                if head.saturating_sub(block) + 1 < self.required_confirmations {
-                    // In a block but not final; skip a redundant rewrite if unchanged.
-                    return Ok(match handle.status {
-                        TxStatus::Mined {
-                            block_hash: prev, ..
-                        } if prev == block_hash => None,
-                        _ => Some(TxStatus::Mined { block, block_hash }),
-                    });
-                }
-                Ok(Some(if r.status() {
-                    TxStatus::Confirmed { block }
-                } else {
-                    TxStatus::Failed {
-                        reason: "reverted on-chain".into(),
-                    }
-                }))
+        let (mode, finalized) = match self.rpc.finalized_block().await? {
+            Some(finalized) => (Finality::Finalized, finalized),
+            None => (Finality::Depth, 0),
+        };
+        if finalized > latest {
+            return Ok(None);
+        }
+        self.last_latest.store(latest, Ordering::Relaxed);
+        Ok(Some(Cycle {
+            view: ChainView { latest, finalized },
+            finality: FinalityConfig {
+                mode,
+                required: self.required_confirmations,
+            },
+            mined_nonce,
+        }))
+    }
+
+    /// Distill one handle's chain reads into a single trustworthy [`ChainEvent`]. Our
+    /// own tx is the strongest evidence, so a hash-anchored receipt wins over the nonce
+    /// count — a lagging `tx_count` can neither hide nor un-mine a canonical tx. With no
+    /// receipt, the nonce decides: consumed by a foreign tx (`Replaced`) or still ours
+    /// (`Pending`). Any read error or non-canonical receipt is `Unknown`.
+    async fn event_for(&self, handle: &TxHandle, mined: u64) -> ChainEvent {
+        // Newest-first: after an RBF bump the latest replacement is the one that mines.
+        for hash in handle.broadcasts.iter().rev() {
+            match self.rpc.receipt(*hash).await {
+                Ok(None) => continue, // this broadcast isn't mined; try an older one
+                Ok(Some(receipt)) => return self.anchor(receipt).await,
+                Err(_) => return ChainEvent::Unknown,
             }
-            // A foreign hash consumed our nonce; depth-gate before declaring it final so a
-            // reorg that frees the nonce (handled above) can still recover our tx.
-            None => Ok(match handle.status {
-                TxStatus::Replacing { since_block } => (head.saturating_sub(since_block)
-                    >= self.required_confirmations)
-                    .then_some(TxStatus::Replaced),
-                _ => Some(TxStatus::Replacing { since_block: head }),
-            }),
+        }
+        match handle.nonce < mined {
+            true => ChainEvent::Replaced, // a foreign tx consumed our nonce
+            false => ChainEvent::Pending, // still in the mempool
         }
     }
 
-    /// The receipt of whichever of our broadcasts mined (`None` if none did). Scans
-    /// newest-first: after an RBF bump the latest replacement is the one that can mine.
-    async fn our_receipt(
-        &self,
-        handle: &TxHandle,
-    ) -> Result<Option<TransactionReceipt>, TransactionManagerError> {
-        for hash in handle.broadcasts.iter().rev() {
-            if let Some(receipt) = self.rpc.receipt(*hash).await? {
-                return Ok(Some(receipt));
-            }
+    /// Trust a receipt only if its block is still canonical — `block_hash(n)` must equal
+    /// the receipt's hash (geth serves receipts from stale forks after a reorg). A
+    /// non-canonical block, a receipt with no block anchor, or a read error is `Unknown`.
+    async fn anchor(&self, receipt: TransactionReceipt) -> ChainEvent {
+        let (Some(block), Some(block_hash)) = (receipt.block_number, receipt.block_hash) else {
+            return ChainEvent::Unknown;
+        };
+        match self.rpc.block_hash(block).await {
+            Ok(Some(canonical)) if canonical == block_hash => ChainEvent::Mined {
+                block,
+                block_hash,
+                outcome: match receipt.status() {
+                    true => Outcome::Executed,
+                    false => Outcome::Reverted,
+                },
+            },
+            _ => ChainEvent::Unknown,
         }
-        Ok(None)
     }
 
     /// Bump every still-pending tx that has outstayed the timeout: raise its fees at
@@ -358,12 +371,15 @@ mod tests {
         assert_eq!(*submit.seen.lock(), vec![Bytes::from_static(&[1, 2, 3])]);
     }
 
-    /// Run one confirm cycle against a fixed chain view (mined nonce, head, receipt).
+    /// Run one confirm cycle against a fixed chain view. `canonical` is the hash
+    /// `block_hash(_)` returns, so a receipt anchors only when it matches. Depth mode
+    /// (no `finalized` tag), `confirmations` required.
     async fn run_confirm(
         store: &Arc<MockStore>,
         tx_count: u64,
         head: u64,
         receipt: Option<TransactionReceipt>,
+        canonical: Option<B256>,
         confirmations: u64,
     ) {
         Harness::default()
@@ -371,6 +387,7 @@ mod tests {
                 tx_count,
                 block_number: head,
                 receipt,
+                canonical,
                 ..Default::default()
             }))
             .store(store.clone())
@@ -382,18 +399,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirm_advances_on_nonce_progression_at_required_depth() {
+    async fn confirm_advances_on_anchored_receipt_at_required_depth() {
         let store = Arc::new(MockStore::default());
         store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
-        // nonce 4 < mined 5; receipt at block 8, head 10 -> depth 3 >= 2.
-        run_confirm(
-            &store,
-            5,
-            10,
-            Some(receipt(true, 8, B256::repeat_byte(1))),
-            2,
-        )
-        .await;
+        let h = B256::repeat_byte(1);
+        // receipt at block 8 anchors to the canonical hash; head 10 -> depth 3 >= 2.
+        run_confirm(&store, 5, 10, Some(receipt(true, 8, h)), Some(h), 2).await;
         assert_eq!(store.all()[0].status, TxStatus::Confirmed { block: 8 });
     }
 
@@ -401,19 +412,37 @@ mod tests {
     async fn reverted_receipt_fails_only_at_depth() {
         let store = Arc::new(MockStore::default());
         store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
-        run_confirm(
-            &store,
-            5,
-            10,
-            Some(receipt(false, 8, B256::repeat_byte(1))),
-            2,
-        )
-        .await;
+        let h = B256::repeat_byte(1);
+        run_confirm(&store, 5, 10, Some(receipt(false, 8, h)), Some(h), 2).await;
         assert!(matches!(store.all()[0].status, TxStatus::Failed { .. }));
     }
 
     #[tokio::test]
-    async fn reorg_unmine_returns_handle_to_sent() {
+    async fn stale_receipt_from_a_reorged_block_holds_the_state() {
+        // The crux at the shell: our receipt claims block 8/hash h2, but the canonical
+        // hash at 8 is h1 -> the read is stale -> Unknown -> no transition.
+        let store = Arc::new(MockStore::default());
+        let mined = TxStatus::Mined {
+            block: 8,
+            block_hash: B256::repeat_byte(1),
+        };
+        store.put_handle(&handle(4, mined.clone())).await.unwrap();
+        run_confirm(
+            &store,
+            5,
+            10,
+            Some(receipt(true, 8, B256::repeat_byte(2))),
+            Some(B256::repeat_byte(1)),
+            2,
+        )
+        .await;
+        assert_eq!(store.all()[0].status, mined); // unchanged
+    }
+
+    #[tokio::test]
+    async fn freed_nonce_un_mines_a_tentative_handle() {
+        // A reorg dropped our mined tx and freed the nonce (tx_count back to our nonce)
+        // with no receipt remaining -> Pending -> re-track from Sent.
         let store = Arc::new(MockStore::default());
         store
             .put_handle(&handle(
@@ -425,15 +454,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        // Same nonce mined, but the receipt now reports a different block hash.
-        run_confirm(
-            &store,
-            5,
-            10,
-            Some(receipt(true, 8, B256::repeat_byte(2))),
-            12,
-        )
-        .await;
+        run_confirm(&store, 4, 10, None, None, 12).await;
         assert_eq!(store.all()[0].status, TxStatus::Sent);
     }
 
@@ -441,14 +462,14 @@ mod tests {
     async fn replacement_is_tentative_until_depth_then_final() {
         let store = Arc::new(MockStore::default());
         store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
-        // nonce consumed (mined 5 > 4) but none of our broadcasts mined.
-        run_confirm(&store, 5, 10, None, 3).await;
+        // nonce consumed (mined 5 > 4) but none of our broadcasts mined -> a foreign tx.
+        run_confirm(&store, 5, 10, None, None, 3).await;
         assert_eq!(
             store.all()[0].status,
             TxStatus::Replacing { since_block: 10 } // tentative, not yet final
         );
         // Head advances past the depth window -> final.
-        run_confirm(&store, 5, 13, None, 3).await;
+        run_confirm(&store, 5, 13, None, None, 3).await;
         assert_eq!(store.all()[0].status, TxStatus::Replaced);
     }
 
@@ -461,8 +482,69 @@ mod tests {
             .unwrap();
         // A reorg dropped the replacing tx: the mined nonce fell back to 4, so our
         // nonce is free again and our tx must be re-tracked.
-        run_confirm(&store, 4, 10, None, 12).await;
+        run_confirm(&store, 4, 10, None, None, 12).await;
         assert_eq!(store.all()[0].status, TxStatus::Sent);
+    }
+
+    #[tokio::test]
+    async fn finalized_tag_gates_terminality() {
+        // With a finalized tag, a receipt is terminal only once its block <= finalized,
+        // regardless of how far ahead `latest` is.
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        let h = B256::repeat_byte(1);
+        let confirm_with_finalized = async |finalized: u64| {
+            Harness::default()
+                .rpc(Arc::new(MockRpc {
+                    tx_count: 5,
+                    block_number: 100,
+                    finalized: Some(finalized),
+                    receipt: Some(receipt(true, 8, h)),
+                    canonical: Some(h),
+                    ..Default::default()
+                }))
+                .store(store.clone())
+                .executor()
+                .confirm()
+                .await
+                .unwrap();
+        };
+        // finalized 7 < block 8 -> tentative Mined despite the far-ahead head.
+        confirm_with_finalized(7).await;
+        assert_eq!(
+            store.all()[0].status,
+            TxStatus::Mined {
+                block: 8,
+                block_hash: h
+            }
+        );
+        // finalized advances to 8 -> now irreversible.
+        confirm_with_finalized(8).await;
+        assert_eq!(store.all()[0].status, TxStatus::Confirmed { block: 8 });
+    }
+
+    #[tokio::test]
+    async fn inconsistent_view_skips_the_cycle() {
+        // finalized above latest is a stale/inconsistent read -> skip, no transition,
+        // even though the receipt would otherwise confirm.
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        let h = B256::repeat_byte(1);
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 5,
+                block_number: 100,
+                finalized: Some(200), // > latest -> inconsistent
+                receipt: Some(receipt(true, 8, h)),
+                canonical: Some(h),
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .executor()
+            .confirm()
+            .await
+            .unwrap();
+        assert_eq!(store.all()[0].status, TxStatus::Sent); // unchanged
     }
 
     // --- Send / bump ---

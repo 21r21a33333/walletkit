@@ -102,14 +102,17 @@ impl Clock for MockClock {
 // ---- Rpc ----
 
 /// Every read returns its field; `estimate_gas` logs and can simulate a revert.
-/// `finalized_block`/`block_hash` are inert (`None`) until a test needs them.
+/// `finalized` is the `finalized`-tag head (`None` => depth mode); `canonical` is the
+/// hash `block_hash(_)` returns for receipt anchoring (`None` => no such block).
 #[derive(Default)]
 pub(crate) struct MockRpc {
     pub pending_nonce: u64,
     pub tx_count: u64,
     pub block_number: u64,
+    pub finalized: Option<u64>,
     pub base_fee: u128,
     pub receipt: Option<TransactionReceipt>,
+    pub canonical: Option<B256>,
     pub gas_reverts: bool,
     pub log: CallLog,
 }
@@ -126,10 +129,10 @@ impl Rpc for MockRpc {
         Ok(self.block_number)
     }
     async fn finalized_block(&self) -> Result<Option<u64>, RpcError> {
-        Ok(None)
+        Ok(self.finalized)
     }
     async fn block_hash(&self, _: u64) -> Result<Option<B256>, RpcError> {
-        Ok(None)
+        Ok(self.canonical)
     }
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
         Ok(estimation(0, 0))
