@@ -9,3 +9,6 @@
 
 pub mod adapters;
 pub mod core;
+
+#[cfg(test)]
+pub(crate) mod testutils;

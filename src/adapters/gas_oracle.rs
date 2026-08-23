@@ -68,58 +68,25 @@ impl GasOracle for RpcGasOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::deps::RpcError;
-    use alloy_primitives::{Address, Bytes, TxHash};
-    use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
-
-    /// Only `base_fee` is exercised by `bump`.
-    struct FakeRpc {
-        base_fee: u128,
-    }
-
-    #[async_trait]
-    impl Rpc for FakeRpc {
-        async fn base_fee(&self) -> Result<u128, RpcError> {
-            Ok(self.base_fee)
-        }
-        async fn pending_nonce(&self, _: Address) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn tx_count(&self, _: Address) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn block_number(&self) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
-            unreachable!()
-        }
-        async fn estimate_gas(&self, _: &TransactionRequest) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn send_raw(&self, _: Bytes) -> Result<TxHash, RpcError> {
-            unreachable!()
-        }
-        async fn receipt(&self, _: TxHash) -> Result<Option<TransactionReceipt>, RpcError> {
-            unreachable!()
-        }
-    }
+    use crate::testutils::{MockRpc, estimation};
 
     fn oracle(base_fee: u128, ceiling: u128) -> RpcGasOracle {
-        RpcGasOracle::new(Arc::new(FakeRpc { base_fee }), ceiling)
-    }
-
-    fn prev(cap: u128, tip: u128) -> Eip1559Estimation {
-        Eip1559Estimation {
-            max_fee_per_gas: cap,
-            max_priority_fee_per_gas: tip,
-        }
+        RpcGasOracle::new(
+            Arc::new(MockRpc {
+                base_fee,
+                ..Default::default()
+            }),
+            ceiling,
+        )
     }
 
     #[tokio::test]
     async fn bump_meets_geth_threshold_and_strict_greater_on_both_fields() {
         // Low base fee so the RBF cap, not coverage, sets max_fee.
-        let next = oracle(1, u128::MAX).bump(prev(1_000, 100)).await.unwrap();
+        let next = oracle(1, u128::MAX)
+            .bump(estimation(1_000, 100))
+            .await
+            .unwrap();
         assert_eq!(next.max_priority_fee_per_gas, 110); // ceil(1.1 * 100)
         assert_eq!(next.max_fee_per_gas, 1_100); // ceil(1.1 * 1000)
         assert!(next.max_fee_per_gas > 1_000 && next.max_priority_fee_per_gas > 100);
@@ -128,7 +95,7 @@ mod tests {
     #[tokio::test]
     async fn bump_low_wei_still_strictly_increases() {
         // geth's floor admits floor(1.1*1)=1 (equality); max(old+1) forces 2.
-        let next = oracle(0, u128::MAX).bump(prev(1, 1)).await.unwrap();
+        let next = oracle(0, u128::MAX).bump(estimation(1, 1)).await.unwrap();
         assert_eq!(next.max_priority_fee_per_gas, 2);
         assert_eq!(next.max_fee_per_gas, 2);
     }
@@ -137,7 +104,7 @@ mod tests {
     async fn bump_covers_base_fee_via_2x_multiplier() {
         // High base fee — coverage (2*baseFee + tip) dominates the RBF cap.
         let next = oracle(1_000_000, u128::MAX)
-            .bump(prev(1_000, 100))
+            .bump(estimation(1_000, 100))
             .await
             .unwrap();
         assert_eq!(next.max_priority_fee_per_gas, 110);
@@ -147,7 +114,10 @@ mod tests {
 
     #[tokio::test]
     async fn bump_errors_at_ceiling_instead_of_looping() {
-        let err = oracle(1, 1_050).bump(prev(1_000, 100)).await.unwrap_err();
+        let err = oracle(1, 1_050)
+            .bump(estimation(1_000, 100))
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             GasOracleError::CeilingExceeded {

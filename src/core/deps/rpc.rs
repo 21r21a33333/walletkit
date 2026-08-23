@@ -1,5 +1,5 @@
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::{Address, Bytes, TxHash};
+use alloy_primitives::{Address, B256, Bytes, TxHash};
 use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
 
@@ -15,6 +15,14 @@ pub trait Rpc: Send + Sync {
     async fn tx_count(&self, account: Address) -> Result<u64, RpcError>;
     /// Latest block number, for confirmation depth.
     async fn block_number(&self) -> Result<u64, RpcError>;
+    /// Latest finalized block number (the `finalized` tag), or `None` when the chain
+    /// doesn't expose it (pre-merge, some L2s) so the caller falls back to a depth
+    /// count. An outcome is treated as irreversible only at or below this height.
+    async fn finalized_block(&self) -> Result<Option<u64>, RpcError>;
+    /// Canonical hash of block `number`, or `None` if that block isn't on-chain yet.
+    /// Anchors a receipt: a receipt whose block hash disagrees with this is a
+    /// stale/reorged read and must not advance the tx lifecycle.
+    async fn block_hash(&self, number: u64) -> Result<Option<B256>, RpcError>;
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError>;
     /// Base fee of the latest block (0 on pre-1559 chains).
     async fn base_fee(&self) -> Result<u128, RpcError>;

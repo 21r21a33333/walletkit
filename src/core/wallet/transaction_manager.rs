@@ -232,249 +232,52 @@ pub enum TransactionManagerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::deps::Versioned;
-    use crate::core::wallet::{GasEnvelope, NonceScope, NonceState};
-    use alloy_consensus::TxEip1559;
-    use alloy_primitives::{Address, Bytes, Signature, TxHash, TxKind, U256, address};
-    use alloy_rpc_types_eth::TransactionReceipt;
+    use crate::testutils::{
+        CallLog, Harness, MockGas, MockNonce, MockPolicy, MockRpc, MockSigner, MockStore,
+        MockSubmit, Submit, intent, shared_log,
+    };
+    use alloy_primitives::address;
 
-    struct TestClock;
-    impl Clock for TestClock {
-        fn now_unix(&self) -> u64 {
-            0
-        }
-    }
-    use async_trait::async_trait;
-    use std::sync::Mutex;
-
-    type Log = Arc<Mutex<Vec<&'static str>>>;
-    fn log(l: &Log, ev: &'static str) {
-        l.lock().unwrap().push(ev);
-    }
-
-    struct MockRpc {
-        l: Log,
-        estimate_ok: bool,
-    }
-    #[async_trait]
-    impl Rpc for MockRpc {
-        async fn estimate_gas(&self, _: &TransactionRequest) -> Result<u64, RpcError> {
-            log(&self.l, "estimate_gas");
-            if self.estimate_ok {
-                Ok(21_000)
-            } else {
-                // A revert surfaces from estimate_gas as a deterministic (non-transient) error.
-                Err(RpcError::Call {
-                    message: "execution reverted".into(),
-                    transient: false,
-                })
-            }
-        }
-        async fn pending_nonce(&self, _: Address) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn tx_count(&self, _: Address) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn block_number(&self) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
-            unreachable!()
-        }
-        async fn base_fee(&self) -> Result<u128, RpcError> {
-            unreachable!()
-        }
-        async fn send_raw(&self, _: Bytes) -> Result<TxHash, RpcError> {
-            unreachable!()
-        }
-        async fn receipt(&self, _: TxHash) -> Result<Option<TransactionReceipt>, RpcError> {
-            unreachable!()
-        }
-    }
-
-    struct MockGas {
-        l: Log,
-    }
-    #[async_trait]
-    impl GasOracle for MockGas {
-        async fn estimate(&self) -> Result<Eip1559Estimation, GasOracleError> {
-            log(&self.l, "fees");
-            Ok(Eip1559Estimation {
-                max_fee_per_gas: 100,
-                max_priority_fee_per_gas: 1,
-            })
-        }
-        async fn bump(&self, _: Eip1559Estimation) -> Result<Eip1559Estimation, GasOracleError> {
-            unreachable!()
-        }
-    }
-
-    struct MockPolicy {
-        l: Log,
-        allow: bool,
-    }
-    #[async_trait]
-    impl PolicyEngine for MockPolicy {
-        async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError> {
-            log(&self.l, "policy");
-            Ok(if self.allow {
-                Decision::Allow(PolicyApproval::mint(
-                    intent.hash(),
-                    GasEnvelope::DEFAULT,
-                    u64::MAX,
-                ))
-            } else {
-                Decision::Deny(PolicyRejection {
-                    rule: "test".into(),
-                    field: None,
-                    reason: "blocked".into(),
-                })
-            })
-        }
-    }
-
-    struct MockNonce {
-        l: Log,
-    }
-    #[async_trait]
-    impl NonceManager for MockNonce {
-        async fn allocate(&self, _: Address) -> Result<u64, NonceManagerError> {
-            log(&self.l, "allocate");
-            Ok(7)
-        }
-        async fn release(&self, _: Address, _: u64) -> Result<(), NonceManagerError> {
-            log(&self.l, "release");
-            Ok(())
-        }
-        async fn reset(&self, _: Address, _: u64) -> Result<(), NonceManagerError> {
-            log(&self.l, "reset");
-            Ok(())
-        }
-    }
-
-    struct MockSigner {
-        l: Log,
-        ok: bool,
-    }
-    #[async_trait]
-    impl Signer for MockSigner {
-        fn address(&self) -> Address {
-            Address::ZERO
-        }
-        async fn sign_transaction(
-            &self,
-            _: &TxEip1559,
-            _: crate::core::wallet::IntentHash,
-            _: &PolicyApproval,
-            _: u64,
-        ) -> Result<Signature, SignerError> {
-            log(&self.l, "sign");
-            if self.ok {
-                Ok(Signature::new(U256::from(1), U256::from(1), false))
-            } else {
-                Err(SignerError::Backend("boom".into()))
-            }
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum Submit {
-        Ok,
-        Transient,
-        Deterministic,
-    }
-    struct MockSubmit {
-        l: Log,
-        outcome: Submit,
-    }
-    #[async_trait]
-    impl SubmissionStrategy for MockSubmit {
-        async fn submit(&self, _: Bytes) -> Result<TxHash, SubmissionError> {
-            log(&self.l, "submit");
-            match self.outcome {
-                Submit::Ok => Ok(TxHash::ZERO),
-                Submit::Transient => Err(SubmissionError::Rpc(RpcError::Call {
-                    message: "timeout".into(),
-                    transient: true,
-                })),
-                Submit::Deterministic => Err(SubmissionError::Rpc(RpcError::Call {
-                    message: "invalid".into(),
-                    transient: false,
-                })),
-            }
-        }
-    }
-
-    /// Records only the persist step; nonce state is never touched (allocate is mocked).
-    struct MockStore {
-        l: Log,
-    }
-    #[async_trait]
-    impl StateStore for MockStore {
-        async fn put_handle(&self, _: &TxHandle) -> Result<(), StateStoreError> {
-            log(&self.l, "persist");
-            Ok(())
-        }
-        async fn load_nonce_state(
-            &self,
-            _: NonceScope,
-        ) -> Result<Versioned<NonceState>, StateStoreError> {
-            unreachable!()
-        }
-        async fn cas_nonce_state(
-            &self,
-            _: NonceScope,
-            _: u64,
-            _: &NonceState,
-        ) -> Result<bool, StateStoreError> {
-            unreachable!()
-        }
-        async fn pending_handles(&self, _: Address) -> Result<Vec<TxHandle>, StateStoreError> {
-            unreachable!()
-        }
-    }
-
-    fn intent() -> TxIntent {
-        TxIntent {
-            chain_id: 1,
-            account: Address::ZERO,
-            to: TxKind::Call(address!("0x00000000000000000000000000000000000000aa")),
-            value: U256::ZERO,
-            input: Bytes::new(),
-            purpose: None,
-        }
-    }
-
+    /// Wires the pipeline sharing one call log across the mocks so a test can assert
+    /// the exact stage order.
     fn manager(
         allow: bool,
         estimate_ok: bool,
         sign_ok: bool,
         submit: Submit,
-    ) -> (TransactionManager, Log) {
-        let l: Log = Arc::new(Mutex::new(Vec::new()));
-        let tm = TransactionManager::new(
-            Arc::new(MockRpc {
-                l: l.clone(),
-                estimate_ok,
-            }),
-            Arc::new(MockGas { l: l.clone() }),
-            Arc::new(MockPolicy {
-                l: l.clone(),
+    ) -> (TransactionManager, CallLog) {
+        let l = shared_log();
+        let tm = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                gas_reverts: !estimate_ok,
+                log: l.clone(),
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                log: l.clone(),
+                ..Default::default()
+            }))
+            .policy(Arc::new(MockPolicy {
                 allow,
-            }),
-            Arc::new(MockNonce { l: l.clone() }),
-            Arc::new(MockSigner {
-                l: l.clone(),
+                log: l.clone(),
+                ..Default::default()
+            }))
+            .nonce(Arc::new(MockNonce {
+                next: 7,
+                log: l.clone(),
+            }))
+            .signer(Arc::new(MockSigner {
                 ok: sign_ok,
-            }),
-            Arc::new(MockSubmit {
-                l: l.clone(),
+                log: l.clone(),
+                ..Default::default()
+            }))
+            .submit(Arc::new(MockSubmit {
                 outcome: submit,
-            }),
-            Arc::new(MockStore { l: l.clone() }),
-            Arc::new(TestClock),
-        );
+                log: l.clone(),
+                ..Default::default()
+            }))
+            .store(Arc::new(MockStore::logged(l.clone())))
+            .manager();
         (tm, l)
     }
 
@@ -483,7 +286,7 @@ mod tests {
         let (tm, l) = manager(true, true, true, Submit::Ok);
         let handle = tm.send(&intent()).await.unwrap();
         assert_eq!(
-            *l.lock().unwrap(),
+            *l.lock(),
             [
                 "estimate_gas",
                 "fees",
@@ -507,7 +310,7 @@ mod tests {
             tm.send(&intent()).await,
             Err(TransactionManagerError::Denied(_))
         ));
-        assert!(!l.lock().unwrap().contains(&"allocate"));
+        assert!(!l.lock().contains(&"allocate"));
     }
 
     #[tokio::test]
@@ -517,7 +320,7 @@ mod tests {
             tm.send(&intent()).await,
             Err(TransactionManagerError::SimulationRejected { .. })
         ));
-        let seen = l.lock().unwrap();
+        let seen = l.lock();
         assert!(!seen.contains(&"sign") && !seen.contains(&"allocate"));
     }
 
@@ -530,7 +333,7 @@ mod tests {
             tm.send(&mismatched).await,
             Err(TransactionManagerError::AccountMismatch { .. })
         ));
-        assert!(l.lock().unwrap().is_empty()); // aborts before any RPC
+        assert!(l.lock().is_empty()); // aborts before any RPC
     }
 
     #[tokio::test]
@@ -539,7 +342,7 @@ mod tests {
         let (tm, l) = manager(true, true, true, Submit::Transient);
         let handle = tm.send(&intent()).await.unwrap();
         assert_eq!(handle.status, TxStatus::Sent);
-        assert!(!l.lock().unwrap().contains(&"release"));
+        assert!(!l.lock().contains(&"release"));
     }
 
     #[tokio::test]
@@ -550,7 +353,7 @@ mod tests {
             tm.send(&intent()).await,
             Err(TransactionManagerError::Submission(_))
         ));
-        let seen = l.lock().unwrap();
+        let seen = l.lock();
         assert!(seen.contains(&"allocate") && seen.contains(&"release"));
     }
 }

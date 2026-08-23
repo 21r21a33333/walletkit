@@ -330,499 +330,211 @@ impl AccountExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::deps::{
-        GasOracleError, NonceManagerError, PolicyEngineError, RpcError, SignerError,
-        StateStoreError, SubmissionError, Versioned,
+    use crate::testutils::{
+        Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, estimation,
+        handle, intent, receipt,
     };
-    use crate::core::wallet::{GasEnvelope, IntentHash, NonceScope, NonceState};
-    use alloy_consensus::TxEip1559;
-    use alloy_primitives::{B256, Bytes, Signature, TxHash, TxKind, U256};
-    use alloy_rpc_types_eth::TransactionRequest;
-    use async_trait::async_trait;
-    use std::sync::Mutex;
+    use alloy_primitives::{B256, Bytes};
 
-    struct MockGas {
-        bumped: Option<Eip1559Estimation>, // None => at ceiling
-    }
-    #[async_trait]
-    impl GasOracle for MockGas {
-        async fn bump(&self, _: Eip1559Estimation) -> Result<Eip1559Estimation, GasOracleError> {
-            self.bumped.ok_or(GasOracleError::CeilingExceeded {
-                ceiling: 0,
-                needed: 1,
-            })
-        }
-        async fn estimate(&self) -> Result<Eip1559Estimation, GasOracleError> {
-            unreachable!()
-        }
-    }
-
-    struct CountingPolicy {
-        calls: Arc<Mutex<u32>>,
-    }
-    #[async_trait]
-    impl PolicyEngine for CountingPolicy {
-        async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError> {
-            *self.calls.lock().unwrap() += 1;
-            Ok(Decision::Allow(PolicyApproval::mint(
-                intent.hash(),
-                GasEnvelope::DEFAULT,
-                u64::MAX,
-            )))
-        }
-    }
-
-    struct OkSigner;
-    #[async_trait]
-    impl Signer for OkSigner {
-        fn address(&self) -> Address {
-            Address::ZERO
-        }
-        async fn sign_transaction(
-            &self,
-            _: &TxEip1559,
-            _: IntentHash,
-            _: &PolicyApproval,
-            _: u64,
-        ) -> Result<Signature, SignerError> {
-            Ok(Signature::new(U256::from(1), U256::from(1), false))
-        }
-    }
-
-    struct FixedClock(u64);
-    impl Clock for FixedClock {
-        fn now_unix(&self) -> u64 {
-            self.0
-        }
-    }
-
-    /// A real-enough StateStore: put updates by id, pending returns non-terminal.
-    #[derive(Default)]
-    struct VecStore {
-        handles: Mutex<Vec<TxHandle>>,
-    }
-    #[async_trait]
-    impl StateStore for VecStore {
-        async fn put_handle(&self, h: &TxHandle) -> Result<(), StateStoreError> {
-            let mut v = self.handles.lock().unwrap();
-            match v.iter_mut().find(|x| x.id == h.id) {
-                Some(slot) => *slot = h.clone(),
-                None => v.push(h.clone()),
-            }
-            Ok(())
-        }
-        async fn pending_handles(
-            &self,
-            account: Address,
-        ) -> Result<Vec<TxHandle>, StateStoreError> {
-            Ok(self
-                .handles
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|h| h.account == account && !h.status.is_terminal())
-                .cloned()
-                .collect())
-        }
-        async fn load_nonce_state(
-            &self,
-            _: NonceScope,
-        ) -> Result<Versioned<NonceState>, StateStoreError> {
-            unreachable!()
-        }
-        async fn cas_nonce_state(
-            &self,
-            _: NonceScope,
-            _: u64,
-            _: &NonceState,
-        ) -> Result<bool, StateStoreError> {
-            unreachable!()
-        }
-    }
-
-    /// Fixed chain view for the Confirm tests.
-    struct ConfirmRpc {
-        mined: u64,
-        head: u64,
-        receipt: Option<TransactionReceipt>,
-    }
-    #[async_trait]
-    impl Rpc for ConfirmRpc {
-        async fn tx_count(&self, _: Address) -> Result<u64, RpcError> {
-            Ok(self.mined)
-        }
-        async fn block_number(&self) -> Result<u64, RpcError> {
-            Ok(self.head)
-        }
-        async fn receipt(&self, _: TxHash) -> Result<Option<TransactionReceipt>, RpcError> {
-            Ok(self.receipt.clone())
-        }
-        async fn pending_nonce(&self, _: Address) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn estimate_gas(&self, _: &TransactionRequest) -> Result<u64, RpcError> {
-            unreachable!()
-        }
-        async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
-            unreachable!()
-        }
-        async fn base_fee(&self) -> Result<u128, RpcError> {
-            unreachable!()
-        }
-        async fn send_raw(&self, _: Bytes) -> Result<TxHash, RpcError> {
-            unreachable!()
-        }
-    }
-
-    /// Records rebroadcast bytes; accepts everything.
-    #[derive(Default)]
-    struct RecordSubmit {
-        seen: Arc<Mutex<Vec<Bytes>>>,
-    }
-    #[async_trait]
-    impl SubmissionStrategy for RecordSubmit {
-        async fn submit(&self, rlp: Bytes) -> Result<TxHash, SubmissionError> {
-            self.seen.lock().unwrap().push(rlp);
-            Ok(TxHash::ZERO)
-        }
-    }
-
-    /// Confirm only reconciles the allocator forward; allocate/release never run here.
-    struct TrackNonce;
-    #[async_trait]
-    impl NonceManager for TrackNonce {
-        async fn reset(&self, _: Address, _: u64) -> Result<(), NonceManagerError> {
-            Ok(())
-        }
-        async fn allocate(&self, _: Address) -> Result<u64, NonceManagerError> {
-            unreachable!()
-        }
-        async fn release(&self, _: Address, _: u64) -> Result<(), NonceManagerError> {
-            unreachable!()
-        }
-    }
-
-    fn receipt(success: bool, block: u64, block_hash: B256) -> TransactionReceipt {
-        use alloy_consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom};
-        TransactionReceipt {
-            inner: ReceiptEnvelope::Eip1559(ReceiptWithBloom {
-                receipt: Receipt {
-                    status: success.into(),
-                    cumulative_gas_used: 0,
-                    logs: vec![],
-                },
-                logs_bloom: Default::default(),
-            }),
-            transaction_hash: TxHash::ZERO,
-            transaction_index: None,
-            block_hash: Some(block_hash),
-            block_number: Some(block),
-            gas_used: 0,
-            effective_gas_price: 0,
-            blob_gas_used: None,
-            blob_gas_price: None,
-            from: Address::ZERO,
-            to: None,
-            contract_address: None,
-        }
-    }
-
-    fn inflight(nonce: u64, status: TxStatus) -> TxHandle {
-        TxHandle {
-            id: HandleId::new(B256::ZERO, nonce),
-            account: Address::ZERO,
-            intent_hash: B256::ZERO,
-            nonce,
-            status,
-            signed: Bytes::from_static(&[1, 2, 3]),
-            broadcasts: vec![TxHash::ZERO],
-        }
-    }
-
-    fn executor(rpc: Arc<dyn Rpc>, store: Arc<VecStore>) -> AccountExecutor {
-        AccountExecutor::new(
-            rpc,
-            Arc::new(TrackNonce),
-            Arc::new(RecordSubmit::default()),
-            store,
-            Arc::new(MockGas { bumped: None }),
-            Arc::new(CountingPolicy {
-                calls: Arc::new(Mutex::new(0)),
-            }),
-            Arc::new(OkSigner),
-            Arc::new(FixedClock(0)),
-            Address::ZERO,
-        )
-    }
+    // --- Recover / confirm ---
 
     #[tokio::test]
     async fn recover_rebroadcasts_persisted_inflight_after_restart() {
-        let store = Arc::new(VecStore::default());
-        store
-            .put_handle(&inflight(4, TxStatus::Sent))
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        let submit = Arc::new(MockSubmit::default());
+        let exec = Harness::default()
+            .submit(submit.clone())
+            .store(store.clone())
+            .executor();
+        exec.recover().await.unwrap();
+        assert_eq!(*submit.seen.lock(), vec![Bytes::from_static(&[1, 2, 3])]);
+    }
+
+    /// Run one confirm cycle against a fixed chain view (mined nonce, head, receipt).
+    async fn run_confirm(
+        store: &Arc<MockStore>,
+        tx_count: u64,
+        head: u64,
+        receipt: Option<TransactionReceipt>,
+        confirmations: u64,
+    ) {
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count,
+                block_number: head,
+                receipt,
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .confirmations(confirmations)
+            .executor()
+            .confirm()
             .await
             .unwrap();
-        let submit = Arc::new(RecordSubmit::default());
-        let exec = AccountExecutor::new(
-            Arc::new(ConfirmRpc {
-                mined: 0,
-                head: 0,
-                receipt: None,
-            }),
-            Arc::new(TrackNonce),
-            submit.clone(),
-            store,
-            Arc::new(MockGas { bumped: None }),
-            Arc::new(CountingPolicy {
-                calls: Arc::new(Mutex::new(0)),
-            }),
-            Arc::new(OkSigner),
-            Arc::new(FixedClock(0)),
-            Address::ZERO,
-        );
-        exec.recover().await.unwrap();
-        assert_eq!(
-            *submit.seen.lock().unwrap(),
-            vec![Bytes::from_static(&[1, 2, 3])]
-        );
     }
 
     #[tokio::test]
     async fn confirm_advances_on_nonce_progression_at_required_depth() {
-        let store = Arc::new(VecStore::default());
-        store
-            .put_handle(&inflight(4, TxStatus::Sent))
-            .await
-            .unwrap();
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
         // nonce 4 < mined 5; receipt at block 8, head 10 -> depth 3 >= 2.
-        let rpc = ConfirmRpc {
-            mined: 5,
-            head: 10,
-            receipt: Some(receipt(true, 8, B256::repeat_byte(1))),
-        };
-        executor(Arc::new(rpc), store.clone())
-            .with_confirmations(2)
-            .confirm()
-            .await
-            .unwrap();
-        assert_eq!(
-            store.handles.lock().unwrap()[0].status,
-            TxStatus::Confirmed { block: 8 }
-        );
+        run_confirm(
+            &store,
+            5,
+            10,
+            Some(receipt(true, 8, B256::repeat_byte(1))),
+            2,
+        )
+        .await;
+        assert_eq!(store.all()[0].status, TxStatus::Confirmed { block: 8 });
     }
 
     #[tokio::test]
     async fn reverted_receipt_fails_only_at_depth() {
-        let store = Arc::new(VecStore::default());
-        store
-            .put_handle(&inflight(4, TxStatus::Sent))
-            .await
-            .unwrap();
-        let rpc = ConfirmRpc {
-            mined: 5,
-            head: 10,
-            receipt: Some(receipt(false, 8, B256::repeat_byte(1))),
-        };
-        executor(Arc::new(rpc), store.clone())
-            .with_confirmations(2)
-            .confirm()
-            .await
-            .unwrap();
-        assert!(matches!(
-            store.handles.lock().unwrap()[0].status,
-            TxStatus::Failed { .. }
-        ));
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        run_confirm(
+            &store,
+            5,
+            10,
+            Some(receipt(false, 8, B256::repeat_byte(1))),
+            2,
+        )
+        .await;
+        assert!(matches!(store.all()[0].status, TxStatus::Failed { .. }));
     }
 
     #[tokio::test]
     async fn reorg_unmine_returns_handle_to_sent() {
-        let store = Arc::new(VecStore::default());
-        let h1 = B256::repeat_byte(1);
+        let store = Arc::new(MockStore::default());
         store
-            .put_handle(&inflight(
+            .put_handle(&handle(
                 4,
                 TxStatus::Mined {
                     block: 8,
-                    block_hash: h1,
+                    block_hash: B256::repeat_byte(1),
                 },
             ))
             .await
             .unwrap();
         // Same nonce mined, but the receipt now reports a different block hash.
-        let rpc = ConfirmRpc {
-            mined: 5,
-            head: 10,
-            receipt: Some(receipt(true, 8, B256::repeat_byte(2))),
-        };
-        executor(Arc::new(rpc), store.clone())
-            .confirm()
-            .await
-            .unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].status, TxStatus::Sent);
+        run_confirm(
+            &store,
+            5,
+            10,
+            Some(receipt(true, 8, B256::repeat_byte(2))),
+            12,
+        )
+        .await;
+        assert_eq!(store.all()[0].status, TxStatus::Sent);
     }
 
     #[tokio::test]
     async fn replacement_is_tentative_until_depth_then_final() {
-        let store = Arc::new(VecStore::default());
-        store
-            .put_handle(&inflight(4, TxStatus::Sent))
-            .await
-            .unwrap();
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
         // nonce consumed (mined 5 > 4) but none of our broadcasts mined.
-        executor(
-            Arc::new(ConfirmRpc {
-                mined: 5,
-                head: 10,
-                receipt: None,
-            }),
-            store.clone(),
-        )
-        .with_confirmations(3)
-        .confirm()
-        .await
-        .unwrap();
+        run_confirm(&store, 5, 10, None, 3).await;
         assert_eq!(
-            store.handles.lock().unwrap()[0].status,
+            store.all()[0].status,
             TxStatus::Replacing { since_block: 10 } // tentative, not yet final
         );
-
         // Head advances past the depth window -> final.
-        executor(
-            Arc::new(ConfirmRpc {
-                mined: 5,
-                head: 13,
-                receipt: None,
-            }),
-            store.clone(),
-        )
-        .with_confirmations(3)
-        .confirm()
-        .await
-        .unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].status, TxStatus::Replaced);
+        run_confirm(&store, 5, 13, None, 3).await;
+        assert_eq!(store.all()[0].status, TxStatus::Replaced);
     }
 
     #[tokio::test]
     async fn replacement_reorg_frees_the_nonce_and_recovers_to_sent() {
-        let store = Arc::new(VecStore::default());
+        let store = Arc::new(MockStore::default());
         store
-            .put_handle(&inflight(4, TxStatus::Replacing { since_block: 5 }))
+            .put_handle(&handle(4, TxStatus::Replacing { since_block: 5 }))
             .await
             .unwrap();
-        // A reorg dropped the replacing tx: the account's mined nonce fell back to 4,
-        // so our nonce is free again and our tx must be re-tracked.
-        executor(
-            Arc::new(ConfirmRpc {
-                mined: 4,
-                head: 10,
-                receipt: None,
-            }),
-            store.clone(),
-        )
-        .confirm()
-        .await
-        .unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].status, TxStatus::Sent);
+        // A reorg dropped the replacing tx: the mined nonce fell back to 4, so our
+        // nonce is free again and our tx must be re-tracked.
+        run_confirm(&store, 4, 10, None, 12).await;
+        assert_eq!(store.all()[0].status, TxStatus::Sent);
     }
 
     // --- Send / bump ---
 
-    fn fees(max_fee: u128) -> Eip1559Estimation {
-        Eip1559Estimation {
-            max_fee_per_gas: max_fee,
-            max_priority_fee_per_gas: 1,
-        }
+    /// Executor wired for a single stuck (Sent, nonce 4) tx at clock 1000, bump
+    /// timeout disabled; `bump` is the oracle's next fees (`None` = at ceiling).
+    fn send_setup(
+        bump: Option<Eip1559Estimation>,
+    ) -> (AccountExecutor, Arc<MockStore>, Arc<MockPolicy>) {
+        let store = Arc::new(MockStore::default());
+        let policy = Arc::new(MockPolicy::default());
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump,
+                ..Default::default()
+            }))
+            .policy(policy.clone())
+            .clock(Arc::new(MockClock(1000)))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        (exec, store, policy)
     }
 
-    fn tx_intent() -> TxIntent {
-        TxIntent {
-            chain_id: 1,
-            account: Address::ZERO,
-            to: TxKind::Create,
-            value: U256::ZERO,
-            input: Bytes::new(),
-            purpose: None,
-        }
-    }
-
-    /// Executor wired for a single stuck (Sent, nonce 4) tx, bump timeout disabled.
-    fn send_exec(
-        bumped: Option<Eip1559Estimation>,
-    ) -> (AccountExecutor, Arc<VecStore>, Arc<Mutex<u32>>) {
-        let store = Arc::new(VecStore::default());
-        let calls = Arc::new(Mutex::new(0));
-        let exec = AccountExecutor::new(
-            Arc::new(ConfirmRpc {
-                mined: 4,
-                head: 0,
-                receipt: None,
-            }),
-            Arc::new(TrackNonce),
-            Arc::new(RecordSubmit::default()),
-            store.clone(),
-            Arc::new(MockGas { bumped }),
-            Arc::new(CountingPolicy {
-                calls: calls.clone(),
-            }),
-            Arc::new(OkSigner),
-            Arc::new(FixedClock(1000)),
-            Address::ZERO,
-        )
-        .with_bump_timeout(0);
-        (exec, store, calls)
-    }
-
-    async fn seed_and_track(exec: &AccountExecutor, store: &VecStore, envelope: GasEnvelope) {
-        let handle = inflight(4, TxStatus::Sent);
-        store.put_handle(&handle).await.unwrap();
+    async fn seed_and_track(exec: &AccountExecutor, store: &MockStore, envelope: GasEnvelope) {
+        let h = handle(4, TxStatus::Sent);
+        store.put_handle(&h).await.unwrap();
         let approval = PolicyApproval::mint(B256::ZERO, envelope, u64::MAX);
-        exec.track(handle.id, tx_intent(), approval, 21_000, fees(100));
+        exec.track(h.id, intent(), approval, 21_000, estimation(100, 1));
     }
 
     #[tokio::test]
     async fn bump_within_envelope_reuses_approval() {
-        let (exec, store, calls) = send_exec(Some(fees(200)));
+        let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
         seed_and_track(&exec, &store, GasEnvelope::DEFAULT).await; // wide -> 200 admitted
         exec.send().await.unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].broadcasts.len(), 2); // original + bump
-        assert_eq!(*calls.lock().unwrap(), 0); // approval reused, no re-policy
+        assert_eq!(store.all()[0].broadcasts.len(), 2); // original + bump
+        assert_eq!(*policy.calls.lock(), 0); // approval reused, no re-policy
     }
 
     #[tokio::test]
     async fn bump_beyond_approved_envelope_stops() {
         // Bumped fees exceed the original per-intent ceiling -> hard-stop, no silent
         // widening: no new broadcast and no re-policy.
-        let (exec, store, calls) = send_exec(Some(fees(200)));
+        let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
         let tight = GasEnvelope {
             max_fee_cap: 150,
             max_priority_cap: 150,
         };
         seed_and_track(&exec, &store, tight).await; // 200 > 150 -> stop
         exec.send().await.unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].broadcasts.len(), 1);
-        assert_eq!(*calls.lock().unwrap(), 0);
+        assert_eq!(store.all()[0].broadcasts.len(), 1);
+        assert_eq!(*policy.calls.lock(), 0);
     }
 
     #[tokio::test]
     async fn bump_refreshes_expired_approval_within_envelope() {
         // Approval expired (valid_until 0 < clock 1000) but the bump stays within the
         // envelope -> refresh via policy (not stuck), then bump.
-        let (exec, store, calls) = send_exec(Some(fees(200)));
-        let handle = inflight(4, TxStatus::Sent);
-        store.put_handle(&handle).await.unwrap();
+        let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
+        let h = handle(4, TxStatus::Sent);
+        store.put_handle(&h).await.unwrap();
         let expired = PolicyApproval::mint(B256::ZERO, GasEnvelope::DEFAULT, 0);
-        exec.track(handle.id, tx_intent(), expired, 21_000, fees(100));
+        exec.track(h.id, intent(), expired, 21_000, estimation(100, 1));
         exec.send().await.unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].broadcasts.len(), 2); // bumped
-        assert_eq!(*calls.lock().unwrap(), 1); // refreshed (was expired), not reused
+        assert_eq!(store.all()[0].broadcasts.len(), 2); // bumped
+        assert_eq!(*policy.calls.lock(), 1); // refreshed (was expired), not reused
     }
 
     #[tokio::test]
     async fn bump_stops_at_gas_ceiling() {
-        let (exec, store, calls) = send_exec(None); // gas oracle at ceiling
+        let (exec, store, policy) = send_setup(None); // gas oracle at ceiling
         seed_and_track(&exec, &store, GasEnvelope::DEFAULT).await;
         exec.send().await.unwrap();
-        assert_eq!(store.handles.lock().unwrap()[0].broadcasts.len(), 1); // no new broadcast
-        assert_eq!(*calls.lock().unwrap(), 0);
+        assert_eq!(store.all()[0].broadcasts.len(), 1); // no new broadcast
+        assert_eq!(*policy.calls.lock(), 0);
     }
 }

@@ -24,7 +24,7 @@ pub use chains::{Vendor, public_rpcs, refresh_public_endpoints, vendor_url};
 use crate::core::deps::{Rpc, RpcError};
 use alloy_eips::BlockId;
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::{Address, Bytes, TxHash};
+use alloy_primitives::{Address, B256, Bytes, TxHash};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use alloy_transport::{RpcError as AlloyRpcError, TransportError};
@@ -53,6 +53,26 @@ impl Rpc for Transport {
 
     async fn block_number(&self) -> Result<u64, RpcError> {
         self.provider.get_block_number().await.map_err(rpc_err)
+    }
+
+    async fn finalized_block(&self) -> Result<Option<u64>, RpcError> {
+        // A node that doesn't expose the `finalized` tag returns null (`Ok(None)`);
+        // the caller then falls back to a depth count. Errors stay transient/terminal.
+        Ok(self
+            .provider
+            .get_block(BlockId::finalized())
+            .await
+            .map_err(rpc_err)?
+            .map(|block| block.header.number))
+    }
+
+    async fn block_hash(&self, number: u64) -> Result<Option<B256>, RpcError> {
+        Ok(self
+            .provider
+            .get_block(BlockId::number(number))
+            .await
+            .map_err(rpc_err)?
+            .map(|block| block.header.hash))
     }
 
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
