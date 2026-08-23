@@ -643,6 +643,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regressed_head_between_cycles_skips_confirm_and_makes_no_transition() {
+        // A lagging/failover node serving an older head must short-circuit read_cycle
+        // *before* the nonce reset (and thus before any transition). One executor (the
+        // guard is stateful in last_latest) drives three cycles: 100 advances -> 90
+        // regressed (skip) -> 95 still below 100 (skip — proving the skip didn't corrupt
+        // last_latest down to 90). reset() runs exactly once (cycle 1); counting it is the
+        // decisive proof the two regressed cycles never entered the confirm body. Distinct
+        // from inconsistent_view_skips_the_cycle (which trips the finalized > latest guard).
+        use crate::testutils::{MockNonce, shared_log};
+
+        let log = shared_log();
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4, // nonce not consumed -> cycle 1 is a Pending no-op
+                block_numbers: Mutex::new([100, 90, 95].into()),
+                ..Default::default()
+            }))
+            .nonce(Arc::new(MockNonce {
+                next: 0,
+                log: log.clone(),
+            }))
+            .store(store.clone())
+            .confirmations(2)
+            .executor();
+
+        for _ in 0..3 {
+            exec.confirm().await.unwrap();
+        }
+
+        assert_eq!(store.all()[0].status, TxStatus::Sent); // no transition, ever
+        let resets = log.lock().iter().filter(|e| **e == "reset").count();
+        assert_eq!(resets, 1); // only cycle 1 ran the body; both regressed cycles skipped
+    }
+
+    #[tokio::test]
     async fn inconsistent_view_skips_the_cycle() {
         // finalized above latest is a stale/inconsistent read -> skip, no transition,
         // even though the receipt would otherwise confirm.

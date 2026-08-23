@@ -23,7 +23,7 @@ use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, U256};
 use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// An ordered log of the port calls a pipeline made, shared across mocks to assert
@@ -164,6 +164,10 @@ pub(crate) struct MockRpc {
     pub pending_nonce: u64,
     pub tx_count: u64,
     pub block_number: u64,
+    /// FIFO of heads consumed one per `block_number()` call — for the head-regression
+    /// guard, where one executor must see a lower head the next cycle. Empty falls back
+    /// to `block_number`, so existing fixed-head tests are unaffected.
+    pub block_numbers: Mutex<VecDeque<u64>>,
     pub finalized: Option<u64>,
     pub base_fee: u128,
     pub receipt: Option<TransactionReceipt>,
@@ -185,7 +189,11 @@ impl Rpc for MockRpc {
         Ok(self.tx_count)
     }
     async fn block_number(&self) -> Result<u64, RpcError> {
-        Ok(self.block_number)
+        Ok(self
+            .block_numbers
+            .lock()
+            .pop_front()
+            .unwrap_or(self.block_number))
     }
     async fn finalized_block(&self) -> Result<Option<u64>, RpcError> {
         Ok(self.finalized)
