@@ -607,6 +607,31 @@ mod tests {
         );
     }
 
+    /// Escalate a stuck (Sent, nonce 4, wide DEFAULT envelope) handle whose bump has **no
+    /// cached approval**, so `bump_approval` re-evaluates `policy`. Returns the store for
+    /// outcome assertions. The wide handle envelope keeps the per-intent hard cap out of
+    /// the way, so the only gate is the fresh policy decision.
+    async fn escalate_with_fresh_policy(policy: Arc<MockPolicy>) -> Arc<MockStore> {
+        let store = Arc::new(MockStore::default());
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .policy(policy)
+            .clock(Arc::new(MockClock(1000)))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        exec.escalate().await.unwrap();
+        store
+    }
+
     #[tokio::test]
     async fn bump_within_envelope_reuses_approval() {
         let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
@@ -714,5 +739,59 @@ mod tests {
         );
         exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 1); // aborted, no bump
+    }
+
+    #[tokio::test]
+    async fn bump_denied_by_fresh_policy_leaves_the_tx() {
+        // Policy revoked between send and bump: with no cached approval the bump
+        // re-evaluates, gets Deny, and leaves the tx — no broadcast, no cycle error.
+        let policy = Arc::new(MockPolicy {
+            allow: false,
+            ..Default::default()
+        });
+        let store = escalate_with_fresh_policy(policy.clone()).await;
+        assert_eq!(store.all()[0].broadcasts.len(), 1);
+        assert_eq!(store.all()[0].status, TxStatus::Sent);
+        // calls==1 proves control reached the Deny arm, not an earlier envelope/ceiling
+        // short-circuit (both of which leave calls==0).
+        assert_eq!(*policy.calls.lock(), 1);
+    }
+
+    #[tokio::test]
+    async fn bump_denied_when_refreshed_envelope_no_longer_admits_the_bump() {
+        // Policy re-approves but returns a *tightened* envelope that no longer admits the
+        // bumped fees -> stop, not broadcast (the false arm of `then_some`). The handle's
+        // own envelope stays wide, so the fresh approval's envelope is the sole rejection.
+        let policy = Arc::new(MockPolicy {
+            allow: true,
+            envelope: GasEnvelope {
+                max_fee_cap: 150,
+                max_priority_cap: 150,
+            },
+            valid_until: u64::MAX,
+            ..Default::default()
+        });
+        let store = escalate_with_fresh_policy(policy.clone()).await;
+        assert_eq!(store.all()[0].broadcasts.len(), 1);
+        assert_eq!(store.all()[0].status, TxStatus::Sent);
+        // calls==1 distinguishes this from bump_beyond_approved_envelope_stops (calls==0,
+        // stopped earlier at the per-intent hard cap).
+        assert_eq!(*policy.calls.lock(), 1);
+    }
+
+    #[tokio::test]
+    async fn bump_exactly_at_envelope_ceiling_is_admitted() {
+        // A bump landing exactly on the envelope caps is admitted (inclusive `<=` in
+        // GasEnvelope::admits) — not stranded one wei short. The cached approval carries
+        // the same caps and is reused (calls==0), so the boundary is the only site tested.
+        let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
+        let caps = GasEnvelope {
+            max_fee_cap: 200,
+            max_priority_cap: 1,
+        };
+        seed_and_track(&exec, &store, caps).await;
+        exec.escalate().await.unwrap();
+        assert_eq!(store.all()[0].broadcasts.len(), 2); // bumped
+        assert_eq!(*policy.calls.lock(), 0); // cached approval reused
     }
 }
