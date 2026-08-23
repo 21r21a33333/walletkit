@@ -23,6 +23,7 @@ use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, U256};
 use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// An ordered log of the port calls a pipeline made, shared across mocks to assert
@@ -156,6 +157,8 @@ impl Clock for MockClock {
 /// Every read returns its field; `estimate_gas` logs and can simulate a revert.
 /// `finalized` is the `finalized`-tag head (`None` => depth mode); `canonical` is the
 /// hash `block_hash(_)` returns for receipt anchoring (`None` => no such block).
+/// `receipts` maps a specific broadcast hash to its receipt (for RBF newest-first tests);
+/// a hash not in the map falls back to the scalar `receipt`.
 #[derive(Default)]
 pub(crate) struct MockRpc {
     pub pending_nonce: u64,
@@ -164,6 +167,7 @@ pub(crate) struct MockRpc {
     pub finalized: Option<u64>,
     pub base_fee: u128,
     pub receipt: Option<TransactionReceipt>,
+    pub receipts: HashMap<TxHash, TransactionReceipt>,
     pub canonical: Option<B256>,
     pub gas_reverts: bool,
     pub log: CallLog,
@@ -207,8 +211,11 @@ impl Rpc for MockRpc {
     async fn send_raw(&self, _: Bytes) -> Result<TxHash, RpcError> {
         Ok(TxHash::ZERO)
     }
-    async fn receipt(&self, _: TxHash) -> Result<Option<TransactionReceipt>, RpcError> {
-        Ok(self.receipt.clone())
+    async fn receipt(&self, hash: TxHash) -> Result<Option<TransactionReceipt>, RpcError> {
+        match self.receipts.get(&hash) {
+            Some(receipt) => Ok(Some(receipt.clone())),
+            None => Ok(self.receipt.clone()),
+        }
     }
 }
 

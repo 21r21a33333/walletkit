@@ -1007,6 +1007,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn newest_broadcast_receipt_wins_over_stale_older_hash() {
+        // After an RBF bump, event_for scans broadcasts newest-first. Two cases pin it.
+        use alloy_primitives::TxHash;
+        use std::collections::HashMap;
+        let h_old = TxHash::repeat_byte(0x11);
+        let h_new = TxHash::repeat_byte(0x22);
+        let canonical = B256::repeat_byte(0x88);
+
+        // Case A (ordering): both broadcasts have receipts at different blocks; the newer
+        // (block 8) must win over the older (block 6). A forward scan would not confirm 8.
+        let store = Arc::new(MockStore::default());
+        let mut h = handle(4, TxStatus::Sent);
+        h.broadcasts = vec![h_old, h_new];
+        store.put_handle(&h).await.unwrap();
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 5,
+                block_number: 20,
+                canonical: Some(canonical),
+                receipts: HashMap::from([
+                    (h_old, receipt(true, 6, B256::repeat_byte(0x66))),
+                    (h_new, receipt(true, 8, canonical)),
+                ]),
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .confirmations(2)
+            .executor()
+            .confirm()
+            .await
+            .unwrap();
+        assert_eq!(store.all()[0].status, TxStatus::Confirmed { block: 8 });
+
+        // Case B (receipt beats nonce): our nonce is consumed (tx_count 5 > 4), which by
+        // the nonce path alone reads as Replaced — but the bump's hash-anchored receipt
+        // overrides that to a mined outcome.
+        let store = Arc::new(MockStore::default());
+        let mut h = handle(4, TxStatus::Sent);
+        h.broadcasts = vec![h_old, h_new];
+        store.put_handle(&h).await.unwrap();
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 5,
+                block_number: 20,
+                canonical: Some(canonical),
+                receipts: HashMap::from([(h_new, receipt(true, 8, canonical))]),
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .confirmations(2)
+            .executor()
+            .confirm()
+            .await
+            .unwrap();
+        assert_eq!(store.all()[0].status, TxStatus::Confirmed { block: 8 });
+    }
+
+    #[tokio::test]
+    async fn bump_then_original_mines_bump_receipt_is_ignored_original_wins() {
+        // RBF doesn't guarantee the bump wins: the newest (bump) broadcast is receiptless,
+        // so the newest-first scan must `continue` past its Ok(None) to the older mined
+        // original — not early-return Unknown/Replacing on the first receiptless hash.
+        use alloy_primitives::TxHash;
+        use std::collections::HashMap;
+        let h_orig = TxHash::repeat_byte(0x11);
+        let h_bump = TxHash::repeat_byte(0x22);
+        let canonical = B256::repeat_byte(0x88);
+        let store = Arc::new(MockStore::default());
+        let mut h = handle(4, TxStatus::Sent);
+        h.broadcasts = vec![h_orig, h_bump];
+        store.put_handle(&h).await.unwrap();
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 5,
+                block_number: 10,
+                canonical: Some(canonical),
+                receipts: HashMap::from([(h_orig, receipt(true, 8, canonical))]),
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .confirmations(2)
+            .executor()
+            .confirm()
+            .await
+            .unwrap();
+        assert_eq!(store.all()[0].status, TxStatus::Confirmed { block: 8 });
+    }
+
+    #[tokio::test]
     async fn receipt_missing_block_anchor_yields_unknown() {
         // A receipt with no block anchor (or only one of the two fields) is the
         // pending/partial shape: anchor()'s tuple-destructure guard makes it Unknown and
