@@ -60,10 +60,16 @@ impl Wallet {
         Ok(self.pipeline.send(intent).await?)
     }
 
+    /// The full tracked handle by id (terminal-inclusive), or `None` if the id is
+    /// unknown — the queryable record (status, nonce, broadcasts, …).
+    pub async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, WalletError> {
+        Ok(self.store.handle(id).await?)
+    }
+
     /// The current status of a tracked handle (terminal-inclusive), or `None` if the
     /// id is unknown.
     pub async fn status(&self, id: HandleId) -> Result<Option<TxStatus>, WalletError> {
-        Ok(self.store.handle(id).await?.map(|handle| handle.status))
+        Ok(self.handle(id).await?.map(|handle| handle.status))
     }
 
     /// One executor cycle: recover in-flight → confirm progress → escalate stuck.

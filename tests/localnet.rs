@@ -158,3 +158,42 @@ async fn external_nonce_steal_is_recovered() {
         Some(TxStatus::Confirmed { .. })
     ));
 }
+
+#[tokio::test]
+async fn stuck_tx_is_bumped_then_confirms() {
+    let net = localnet!();
+    net.no_auto_mine().await;
+
+    // Low-fee send sits pending (mining off).
+    let handle = net.wallet.send(&net.intent(1)).await.expect("send");
+    let sent = net
+        .wallet
+        .handle(handle.id)
+        .await
+        .expect("h")
+        .expect("present");
+    assert_eq!(sent.broadcasts.len(), 1);
+
+    // A tick escalates the stuck tx (bump_timeout 0) -> same-nonce RBF -> a 2nd
+    // broadcast, which anvil accepts as a replacement.
+    net.wallet.tick().await.expect("tick-bump");
+    let bumped = net
+        .wallet
+        .handle(handle.id)
+        .await
+        .expect("h")
+        .expect("present");
+    assert!(
+        bumped.broadcasts.len() >= 2,
+        "expected a bump broadcast, got {}",
+        bumped.broadcasts.len()
+    );
+
+    // The bumped tx mines and confirms.
+    net.mine(4).await;
+    net.wallet.tick().await.expect("tick-confirm");
+    assert!(matches!(
+        net.wallet.status(handle.id).await.expect("status"),
+        Some(TxStatus::Confirmed { .. })
+    ));
+}
