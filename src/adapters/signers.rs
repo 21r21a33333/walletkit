@@ -63,11 +63,21 @@ impl Signer for LocalSigner {
         &self,
         tx: &TxEip1559,
         intent_hash: IntentHash,
-        approval: PolicyApproval,
+        approval: &PolicyApproval,
+        now: u64,
     ) -> Result<Signature, SignerError> {
-        // Structural gate: the single-use approval must bind to exactly this intent.
-        if approval.consume() != intent_hash {
+        // Structural gate: bound intent, fees within the approved envelope, unexpired.
+        if !approval.authorizes(intent_hash) {
             return Err(SignerError::ApprovalMismatch);
+        }
+        if now > approval.valid_until() {
+            return Err(SignerError::ApprovalExpired);
+        }
+        if !approval
+            .gas_envelope()
+            .admits(tx.max_fee_per_gas, tx.max_priority_fee_per_gas)
+        {
+            return Err(SignerError::FeesExceedApproval);
         }
         // Local signing is CPU-only; the sync path avoids an executor round-trip.
         self.inner
@@ -83,6 +93,7 @@ fn load(e: impl std::fmt::Display) -> SignerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::wallet::GasEnvelope;
     use alloy_primitives::{B256, address};
 
     // Foundry/Hardhat default test mnemonic + its first two derived accounts.
@@ -101,27 +112,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signs_only_with_an_approval_bound_to_the_intent() {
+    async fn signs_only_within_the_approval_gate() {
         let signer = LocalSigner::from_mnemonic(MNEMONIC, 0).unwrap();
-        let tx = TxEip1559 {
+        let tx = |max_fee: u128| TxEip1559 {
             chain_id: 1,
+            max_fee_per_gas: max_fee,
             ..Default::default()
         };
         let intent = B256::from([0x11; 32]);
         let other = B256::from([0x22; 32]);
+        let envelope = GasEnvelope {
+            max_fee_cap: 100,
+            max_priority_cap: 100,
+        };
+        let approval = |bound, valid_until| PolicyApproval::mint(bound, envelope, valid_until);
 
+        // bound intent, fees within envelope, unexpired -> signs.
         assert!(
             signer
-                .sign_transaction(&tx, intent, PolicyApproval::mint(intent))
+                .sign_transaction(&tx(50), intent, &approval(intent, 1000), 0)
                 .await
                 .is_ok()
         );
-
+        // wrong intent, over-envelope fees, and expiry each trip the gate.
         assert!(matches!(
             signer
-                .sign_transaction(&tx, intent, PolicyApproval::mint(other))
+                .sign_transaction(&tx(50), intent, &approval(other, 1000), 0)
                 .await,
             Err(SignerError::ApprovalMismatch)
+        ));
+        assert!(matches!(
+            signer
+                .sign_transaction(&tx(200), intent, &approval(intent, 1000), 0)
+                .await,
+            Err(SignerError::FeesExceedApproval)
+        ));
+        assert!(matches!(
+            signer
+                .sign_transaction(&tx(50), intent, &approval(intent, 0), 1)
+                .await,
+            Err(SignerError::ApprovalExpired)
         ));
     }
 }

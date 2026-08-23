@@ -84,13 +84,12 @@ impl StateStore for InMemoryStateStore {
     }
 
     async fn pending_handles(&self, account: Address) -> Result<Vec<TxHandle>, StateStoreError> {
-        // Terminal statuses are filtered here once the Confirm phase adds them.
         Ok(self
             .handles
             .lock()
             .unwrap()
             .values()
-            .filter(|h| h.account == account)
+            .filter(|h| h.account == account && !h.status.is_terminal())
             .cloned()
             .collect())
     }
@@ -172,8 +171,9 @@ impl NonceManager for LocalNonceManager {
 mod tests {
     use super::*;
     use crate::core::deps::RpcError;
+    use crate::core::wallet::{TxHandle, TxStatus};
     use alloy_eips::eip1559::Eip1559Estimation;
-    use alloy_primitives::{Bytes, TxHash};
+    use alloy_primitives::{B256, Bytes, TxHash};
     use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
 
     /// Fixed pending-nonce source; the other RPC ops are never hit by these tests.
@@ -185,6 +185,12 @@ mod tests {
     impl Rpc for FakeRpc {
         async fn pending_nonce(&self, _account: Address) -> Result<u64, RpcError> {
             Ok(self.pending)
+        }
+        async fn tx_count(&self, _: Address) -> Result<u64, RpcError> {
+            unreachable!("not used by nonce tests")
+        }
+        async fn block_number(&self) -> Result<u64, RpcError> {
+            unreachable!("not used by nonce tests")
         }
         async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
             unreachable!("not used by nonce tests")
@@ -273,5 +279,33 @@ mod tests {
         }
         nonces.sort_unstable();
         assert_eq!(nonces, (5..55).collect::<Vec<_>>()); // 50 unique & contiguous
+    }
+
+    #[tokio::test]
+    async fn pending_handles_excludes_terminal() {
+        let store = InMemoryStateStore::default();
+        let acct = Address::ZERO;
+        let handle = |nonce: u64, status: TxStatus| TxHandle {
+            id: HandleId::new(B256::ZERO, nonce),
+            account: acct,
+            intent_hash: B256::ZERO,
+            nonce,
+            status,
+            signed: Bytes::new(),
+            broadcasts: vec![TxHash::ZERO],
+        };
+        store.put_handle(&handle(1, TxStatus::Sent)).await.unwrap();
+        store
+            .put_handle(&handle(2, TxStatus::Confirmed { block: 1 }))
+            .await
+            .unwrap();
+        store
+            .put_handle(&handle(3, TxStatus::Replaced))
+            .await
+            .unwrap();
+
+        let pending = store.pending_handles(acct).await.unwrap();
+        assert_eq!(pending.len(), 1); // only the Sent one; terminal excluded
+        assert_eq!(pending[0].nonce, 1);
     }
 }

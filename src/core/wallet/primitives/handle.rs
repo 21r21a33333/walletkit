@@ -15,13 +15,45 @@ impl HandleId {
     }
 }
 
-/// Lifecycle of a tracked transaction. Phase 1 produces `Pending` and `Sent`; the
-/// executor (Task 17) adds the mined/confirmed/failed/replaced/dropped transitions.
+/// Lifecycle of a tracked transaction. Only `Confirmed`/`Failed`/`Replaced` are
+/// terminal, and each is reached only at `required_confirmations` depth — so a reorg
+/// before then re-tracks: `Mined`/`Replacing` fall back to `Sent`. This is the
+/// depth-gated finality of OZ Defender (12 confs) / thirdweb / Alchemy; `Replaced`
+/// on first sight would lose a tx whose nonce a reorg later frees.
+/// (`Dropped` arrives with the Send phase that can produce it.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TxStatus {
     Pending,
     Sent,
+    /// Our tx is in a block; the outcome settles at depth. `block_hash` detects a reorg.
+    Mined {
+        block: u64,
+        block_hash: B256,
+    },
+    /// Our nonce was consumed by a tx that isn't ours, but not yet `required` deep.
+    /// `since_block` (head when first seen) is the depth clock; a reorg reverts to `Sent`.
+    Replacing {
+        since_block: u64,
+    },
+    Confirmed {
+        block: u64,
+    },
+    Failed {
+        reason: String,
+    },
+    Replaced,
+}
+
+impl TxStatus {
+    /// Terminal statuses will not change again, so the executor stops tracking them.
+    /// Only depth-confirmed outcomes qualify — shallower states can still reorg.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Confirmed { .. } | Self::Failed { .. } | Self::Replaced
+        )
+    }
 }
 
 /// Stable, persisted handle to a submitted transaction — the queryable unit a

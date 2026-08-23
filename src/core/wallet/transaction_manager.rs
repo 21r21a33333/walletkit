@@ -4,9 +4,9 @@
 //! fixed-order build path, reusing alloy for all tx mechanics.
 
 use crate::core::deps::{
-    GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine, PolicyEngineError,
-    Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError, SubmissionError,
-    SubmissionStrategy,
+    Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
+    PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
+    SubmissionError, SubmissionStrategy,
 };
 use crate::core::wallet::{
     Decision, HandleId, PolicyApproval, PolicyRejection, TxHandle, TxIntent, TxStatus,
@@ -33,6 +33,7 @@ pub struct TransactionManager {
     signer: Arc<dyn Signer>,
     submission: Arc<dyn SubmissionStrategy>,
     state_store: Arc<dyn StateStore>,
+    clock: Arc<dyn Clock>,
     gas_buffer_pct: u128,
 }
 
@@ -46,6 +47,7 @@ impl TransactionManager {
         signer: Arc<dyn Signer>,
         submission: Arc<dyn SubmissionStrategy>,
         state_store: Arc<dyn StateStore>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             rpc,
@@ -55,6 +57,7 @@ impl TransactionManager {
             signer,
             submission,
             state_store,
+            clock,
             gas_buffer_pct: DEFAULT_GAS_BUFFER_PCT,
         }
     }
@@ -106,17 +109,10 @@ impl TransactionManager {
         };
 
         let nonce = self.nonce_manager.allocate(account).await?;
-        match self
-            .build_sign_submit(intent, gas_limit, fees, nonce, approval)
+        // `build_sign_submit` owns the nonce lifecycle: it recycles the nonce only when
+        // nothing was broadcast, so a live tx's nonce is never freed for reuse.
+        self.build_sign_submit(intent, gas_limit, fees, nonce, approval)
             .await
-        {
-            Ok(handle) => Ok(handle),
-            Err(e) => {
-                // The reservation will never mine — recycle it so it doesn't freeze the lane.
-                let _ = self.nonce_manager.release(account, nonce).await;
-                Err(e)
-            }
-        }
     }
 
     async fn build_sign_submit(
@@ -138,29 +134,64 @@ impl TransactionManager {
             input: intent.input.clone(),
             access_list: Default::default(),
         };
+        let account = intent.account;
         let intent_hash = intent.hash();
-        let signature = self
+        // Pre-broadcast failure (sign): nothing was sent, so recycle the nonce.
+        let signature = match self
             .signer
-            .sign_transaction(&tx, intent_hash, approval)
-            .await?;
+            .sign_transaction(&tx, intent_hash, &approval, self.clock.now_unix())
+            .await
+        {
+            Ok(sig) => sig,
+            Err(e) => {
+                let _ = self.nonce_manager.release(account, nonce).await;
+                return Err(e.into());
+            }
+        };
         let signed = tx.into_signed(signature);
-        let tx_hash = *signed.hash();
         let rlp = Bytes::from(signed.encoded_2718());
 
         let mut handle = TxHandle {
             id: HandleId::new(intent_hash, nonce),
-            account: intent.account,
+            account,
             intent_hash,
             nonce,
             status: TxStatus::Pending,
             signed: rlp.clone(),
-            broadcasts: vec![tx_hash],
+            broadcasts: vec![*signed.hash()],
         };
-        // Persist the signed tx before broadcast (WAL): a crash between submit and ack
-        // is then recoverable by rebroadcasting `signed`.
-        self.state_store.put_handle(&handle).await?;
-        self.submission.submit(rlp).await?;
+        // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
+        // means nothing was sent -> recycle the nonce.
+        if let Err(e) = self.state_store.put_handle(&handle).await {
+            let _ = self.nonce_manager.release(account, nonce).await;
+            return Err(e.into());
+        }
+
+        match self.submission.submit(rlp).await {
+            Ok(_) => {}
+            // Transient/indeterminate: the tx may already be in the mempool. Assume sent
+            // — keep the nonce reserved (releasing could reuse a live nonce -> double
+            // spend) and let recover() rebroadcast if needed (idempotent).
+            Err(e) if is_transient_submit(&e) => {
+                handle.status = TxStatus::Sent;
+                let _ = self.state_store.put_handle(&handle).await;
+                return Ok(handle);
+            }
+            // Deterministic reject: definitely not broadcast -> terminalize + recycle.
+            Err(e) => {
+                handle.status = TxStatus::Failed {
+                    reason: e.to_string(),
+                };
+                let _ = self.state_store.put_handle(&handle).await;
+                let _ = self.nonce_manager.release(account, nonce).await;
+                return Err(e.into());
+            }
+        }
+
+        // Broadcast confirmed. Reflect Sent; a persist failure here must NOT release the
+        // nonce — the tx is live, and freeing its nonce would enable reuse.
         handle.status = TxStatus::Sent;
+        let _ = self.state_store.put_handle(&handle).await;
         Ok(handle)
     }
 
@@ -170,38 +201,16 @@ impl TransactionManager {
     }
 }
 
-/// Per-account tracking executor (thirdweb engine-core pattern): the nonce is
-/// per-account, so one executor serializes an account's in-flight txs. The host
-/// drives `tick` on a `Clock` cadence; `tick` runs Recover → Confirm → Send.
-/// Phase 17a implements Recover.
-pub struct AccountExecutor {
-    submission: Arc<dyn SubmissionStrategy>,
-    state_store: Arc<dyn StateStore>,
-    account: Address,
-}
-
-impl AccountExecutor {
-    pub fn new(
-        submission: Arc<dyn SubmissionStrategy>,
-        state_store: Arc<dyn StateStore>,
-        account: Address,
-    ) -> Self {
-        Self {
-            submission,
-            state_store,
-            account,
-        }
-    }
-
-    /// Rebroadcast every persisted in-flight tx for the account. Idempotent — an
-    /// already-known or already-mined tx is reconciled by Confirm — so a per-handle
-    /// submit failure is skipped; only a store read failure aborts the cycle.
-    pub async fn recover(&self) -> Result<(), TransactionManagerError> {
-        for handle in self.state_store.pending_handles(self.account).await? {
-            let _ = self.submission.submit(handle.signed.clone()).await;
-        }
-        Ok(())
-    }
+/// A transient submit failure is *indeterminate* — the tx may already be in the
+/// mempool — so it is treated as sent, not recycled. A deterministic reject is not.
+fn is_transient_submit(e: &SubmissionError) -> bool {
+    matches!(
+        e,
+        SubmissionError::Rpc(RpcError::Call {
+            transient: true,
+            ..
+        })
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -233,10 +242,17 @@ pub enum TransactionManagerError {
 mod tests {
     use super::*;
     use crate::core::deps::Versioned;
-    use crate::core::wallet::{NonceScope, NonceState};
+    use crate::core::wallet::{GasEnvelope, NonceScope, NonceState};
     use alloy_consensus::TxEip1559;
-    use alloy_primitives::{Address, B256, Signature, TxHash, TxKind, U256, address};
+    use alloy_primitives::{Address, Signature, TxHash, TxKind, U256, address};
     use alloy_rpc_types_eth::TransactionReceipt;
+
+    struct TestClock;
+    impl Clock for TestClock {
+        fn now_unix(&self) -> u64 {
+            0
+        }
+    }
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -264,6 +280,12 @@ mod tests {
             }
         }
         async fn pending_nonce(&self, _: Address) -> Result<u64, RpcError> {
+            unreachable!()
+        }
+        async fn tx_count(&self, _: Address) -> Result<u64, RpcError> {
+            unreachable!()
+        }
+        async fn block_number(&self) -> Result<u64, RpcError> {
             unreachable!()
         }
         async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
@@ -306,7 +328,11 @@ mod tests {
         async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError> {
             log(&self.l, "policy");
             Ok(if self.allow {
-                Decision::Allow(PolicyApproval::mint(intent.hash()))
+                Decision::Allow(PolicyApproval::mint(
+                    intent.hash(),
+                    GasEnvelope::DEFAULT,
+                    u64::MAX,
+                ))
             } else {
                 Decision::Deny(PolicyRejection {
                     rule: "test".into(),
@@ -331,7 +357,8 @@ mod tests {
             Ok(())
         }
         async fn reset(&self, _: Address, _: u64) -> Result<(), NonceManagerError> {
-            unreachable!()
+            log(&self.l, "reset");
+            Ok(())
         }
     }
 
@@ -348,7 +375,8 @@ mod tests {
             &self,
             _: &TxEip1559,
             _: crate::core::wallet::IntentHash,
-            _: PolicyApproval,
+            _: &PolicyApproval,
+            _: u64,
         ) -> Result<Signature, SignerError> {
             log(&self.l, "sign");
             if self.ok {
@@ -359,21 +387,30 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum Submit {
+        Ok,
+        Transient,
+        Deterministic,
+    }
     struct MockSubmit {
         l: Log,
-        ok: bool,
+        outcome: Submit,
     }
     #[async_trait]
     impl SubmissionStrategy for MockSubmit {
         async fn submit(&self, _: Bytes) -> Result<TxHash, SubmissionError> {
             log(&self.l, "submit");
-            if self.ok {
-                Ok(TxHash::ZERO)
-            } else {
-                Err(SubmissionError::Rpc(RpcError::Call {
-                    message: "dropped".into(),
+            match self.outcome {
+                Submit::Ok => Ok(TxHash::ZERO),
+                Submit::Transient => Err(SubmissionError::Rpc(RpcError::Call {
+                    message: "timeout".into(),
                     transient: true,
-                }))
+                })),
+                Submit::Deterministic => Err(SubmissionError::Rpc(RpcError::Call {
+                    message: "invalid".into(),
+                    transient: false,
+                })),
             }
         }
     }
@@ -422,7 +459,7 @@ mod tests {
         allow: bool,
         estimate_ok: bool,
         sign_ok: bool,
-        submit_ok: bool,
+        submit: Submit,
     ) -> (TransactionManager, Log) {
         let l: Log = Arc::new(Mutex::new(Vec::new()));
         let tm = TransactionManager::new(
@@ -442,16 +479,17 @@ mod tests {
             }),
             Arc::new(MockSubmit {
                 l: l.clone(),
-                ok: submit_ok,
+                outcome: submit,
             }),
             Arc::new(MockStore { l: l.clone() }),
+            Arc::new(TestClock),
         );
         (tm, l)
     }
 
     #[tokio::test]
     async fn happy_path_runs_stages_in_order_and_returns_a_handle() {
-        let (tm, l) = manager(true, true, true, true);
+        let (tm, l) = manager(true, true, true, Submit::Ok);
         let handle = tm.send(&intent()).await.unwrap();
         assert_eq!(
             *l.lock().unwrap(),
@@ -461,8 +499,9 @@ mod tests {
                 "policy",
                 "allocate",
                 "sign",
-                "persist",
-                "submit"
+                "persist", // WAL before broadcast
+                "submit",
+                "persist", // status -> Sent after broadcast
             ]
         );
         assert_eq!(handle.status, TxStatus::Sent);
@@ -472,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn policy_deny_aborts_before_allocating_a_nonce() {
-        let (tm, l) = manager(false, true, true, true);
+        let (tm, l) = manager(false, true, true, Submit::Ok);
         assert!(matches!(
             tm.send(&intent()).await,
             Err(TransactionManagerError::Denied(_))
@@ -482,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn estimate_revert_aborts_before_signing() {
-        let (tm, l) = manager(true, false, true, true);
+        let (tm, l) = manager(true, false, true, Submit::Ok);
         assert!(matches!(
             tm.send(&intent()).await,
             Err(TransactionManagerError::SimulationRejected { .. })
@@ -493,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_rejects_when_signer_does_not_control_the_account() {
-        let (tm, l) = manager(true, true, true, true); // signer address is ZERO
+        let (tm, l) = manager(true, true, true, Submit::Ok); // signer address is ZERO
         let mut mismatched = intent();
         mismatched.account = address!("0x00000000000000000000000000000000000000bb");
         assert!(matches!(
@@ -504,76 +543,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_submit_releases_the_nonce() {
-        let (tm, l) = manager(true, true, true, false);
+    async fn transient_submit_failure_assumes_sent_and_keeps_the_nonce() {
+        // Indeterminate submit (may be in-flight) -> assume sent: Ok, Sent, nonce NOT released.
+        let (tm, l) = manager(true, true, true, Submit::Transient);
+        let handle = tm.send(&intent()).await.unwrap();
+        assert_eq!(handle.status, TxStatus::Sent);
+        assert!(!l.lock().unwrap().contains(&"release"));
+    }
+
+    #[tokio::test]
+    async fn deterministic_submit_reject_releases_the_nonce() {
+        // Definitely not broadcast -> terminalize + recycle the nonce.
+        let (tm, l) = manager(true, true, true, Submit::Deterministic);
         assert!(matches!(
             tm.send(&intent()).await,
             Err(TransactionManagerError::Submission(_))
         ));
         let seen = l.lock().unwrap();
         assert!(seen.contains(&"allocate") && seen.contains(&"release"));
-    }
-
-    /// Store seeded as if a prior run had persisted an in-flight tx.
-    struct SeededStore {
-        handles: Vec<TxHandle>,
-    }
-    #[async_trait]
-    impl StateStore for SeededStore {
-        async fn pending_handles(&self, _: Address) -> Result<Vec<TxHandle>, StateStoreError> {
-            Ok(self.handles.clone())
-        }
-        async fn put_handle(&self, _: &TxHandle) -> Result<(), StateStoreError> {
-            unreachable!()
-        }
-        async fn load_nonce_state(
-            &self,
-            _: NonceScope,
-        ) -> Result<Versioned<NonceState>, StateStoreError> {
-            unreachable!()
-        }
-        async fn cas_nonce_state(
-            &self,
-            _: NonceScope,
-            _: u64,
-            _: &NonceState,
-        ) -> Result<bool, StateStoreError> {
-            unreachable!()
-        }
-    }
-
-    struct RecordingSubmit {
-        seen: Arc<Mutex<Vec<Bytes>>>,
-    }
-    #[async_trait]
-    impl SubmissionStrategy for RecordingSubmit {
-        async fn submit(&self, rlp: Bytes) -> Result<TxHash, SubmissionError> {
-            self.seen.lock().unwrap().push(rlp);
-            Ok(TxHash::ZERO)
-        }
-    }
-
-    #[tokio::test]
-    async fn recover_rebroadcasts_persisted_inflight_after_restart() {
-        let signed = Bytes::from_static(&[1, 2, 3]);
-        let handle = TxHandle {
-            id: HandleId::new(B256::ZERO, 4),
-            account: Address::ZERO,
-            intent_hash: B256::ZERO,
-            nonce: 4,
-            status: TxStatus::Sent,
-            signed: signed.clone(),
-            broadcasts: vec![TxHash::ZERO],
-        };
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let exec = AccountExecutor::new(
-            Arc::new(RecordingSubmit { seen: seen.clone() }),
-            Arc::new(SeededStore {
-                handles: vec![handle],
-            }),
-            Address::ZERO,
-        );
-        exec.recover().await.unwrap();
-        assert_eq!(*seen.lock().unwrap(), vec![signed]); // the persisted signed tx, verbatim
     }
 }

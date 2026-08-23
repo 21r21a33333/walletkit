@@ -10,6 +10,11 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Rpc: Send + Sync {
     async fn pending_nonce(&self, account: Address) -> Result<u64, RpcError>;
+    /// Mined tx count for `account` at latest (the next mined nonce) — the executor's
+    /// confirmation signal: a handle's nonce below this has been consumed on-chain.
+    async fn tx_count(&self, account: Address) -> Result<u64, RpcError>;
+    /// Latest block number, for confirmation depth.
+    async fn block_number(&self) -> Result<u64, RpcError>;
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError>;
     /// Base fee of the latest block (0 on pre-1559 chains).
     async fn base_fee(&self) -> Result<u128, RpcError>;

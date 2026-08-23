@@ -44,6 +44,17 @@ impl Rpc for Transport {
             .map_err(rpc_err)
     }
 
+    async fn tx_count(&self, account: Address) -> Result<u64, RpcError> {
+        self.provider
+            .get_transaction_count(account)
+            .await
+            .map_err(rpc_err)
+    }
+
+    async fn block_number(&self) -> Result<u64, RpcError> {
+        self.provider.get_block_number().await.map_err(rpc_err)
+    }
+
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
         self.provider.estimate_eip1559_fees().await.map_err(rpc_err)
     }

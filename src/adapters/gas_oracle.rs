@@ -85,6 +85,12 @@ mod tests {
         async fn pending_nonce(&self, _: Address) -> Result<u64, RpcError> {
             unreachable!()
         }
+        async fn tx_count(&self, _: Address) -> Result<u64, RpcError> {
+            unreachable!()
+        }
+        async fn block_number(&self) -> Result<u64, RpcError> {
+            unreachable!()
+        }
         async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError> {
             unreachable!()
         }

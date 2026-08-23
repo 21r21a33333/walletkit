@@ -18,7 +18,7 @@
 
 use super::wasm::WasmPlugin;
 use crate::core::deps::{PolicyEngine, PolicyEngineError};
-use crate::core::wallet::{Decision, PolicyApproval, PolicyRejection, TxIntent};
+use crate::core::wallet::{Decision, GasEnvelope, PolicyApproval, PolicyRejection, TxIntent};
 use alloy_primitives::TxKind;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -26,6 +26,9 @@ use serde_json::json;
 use std::collections::HashSet;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+
+/// How long a minted approval stays valid for bumps (seconds).
+const APPROVAL_TTL: u64 = 300;
 
 /// A parsed, applicable OWS declarative rule (typed-data-only rules are dropped).
 enum Rule {
@@ -146,7 +149,12 @@ impl PolicyEngine for MoonPayPolicyEngine {
             }
         }
 
-        Ok(Decision::Allow(PolicyApproval::mint(intent.hash())))
+        let valid_until = now.max(0) as u64 + APPROVAL_TTL;
+        Ok(Decision::Allow(PolicyApproval::mint(
+            intent.hash(),
+            GasEnvelope::DEFAULT,
+            valid_until,
+        )))
     }
 }
 

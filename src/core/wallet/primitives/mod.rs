@@ -10,4 +10,4 @@ mod policy;
 pub use handle::{HandleId, TxHandle, TxStatus};
 pub use intent::{IntentHash, TxIntent};
 pub use nonce::{NonceLane, NonceScope, NonceState};
-pub use policy::{Decision, PolicyApproval, PolicyRejection};
+pub use policy::{Decision, GasEnvelope, PolicyApproval, PolicyRejection};

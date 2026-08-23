@@ -1,8 +1,12 @@
-use crate::core::deps::{PolicyEngine, PolicyEngineError};
-use crate::core::wallet::{Decision, PolicyApproval, PolicyRejection, TxIntent};
+use crate::core::deps::{Clock, PolicyEngine, PolicyEngineError};
+use crate::core::wallet::{Decision, GasEnvelope, PolicyApproval, PolicyRejection, TxIntent};
 use alloy_primitives::{Address, TxKind, U256};
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::sync::Arc;
+
+/// How long an approval stays valid for bumps (seconds).
+const DEFAULT_APPROVAL_TTL: u64 = 300;
 
 /// One native rule's verdict on an intent. `Abstain` = "no opinion": a guard that
 /// only speaks up (`Deny`) when tripped and never grants `Allow`.
@@ -75,11 +79,25 @@ impl Policy for SpendLimit {
 /// engines, not more built-in predicates.
 pub struct DefaultPolicyEngine {
     policies: Vec<Box<dyn Policy>>,
+    clock: Arc<dyn Clock>,
+    fee_caps: GasEnvelope,
+    approval_ttl: u64,
 }
 
 impl DefaultPolicyEngine {
-    pub fn new(policies: Vec<Box<dyn Policy>>) -> Self {
-        Self { policies }
+    pub fn new(policies: Vec<Box<dyn Policy>>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            policies,
+            clock,
+            fee_caps: GasEnvelope::DEFAULT,
+            approval_ttl: DEFAULT_APPROVAL_TTL,
+        }
+    }
+
+    /// Override the approved fee ceiling (default ≈ 1000/50 gwei).
+    pub fn with_fee_caps(mut self, fee_caps: GasEnvelope) -> Self {
+        self.fee_caps = fee_caps;
+        self
     }
 
     /// Any `Deny` short-circuits (deny-over-allow); otherwise at least one `Allow`
@@ -94,7 +112,12 @@ impl DefaultPolicyEngine {
             }
         }
         if allowed {
-            Decision::Allow(PolicyApproval::mint(intent.hash()))
+            let valid_until = self.clock.now_unix() + self.approval_ttl;
+            Decision::Allow(PolicyApproval::mint(
+                intent.hash(),
+                self.fee_caps,
+                valid_until,
+            ))
         } else {
             Decision::Deny(PolicyRejection {
                 rule: "default-deny".into(),
@@ -115,6 +138,13 @@ impl PolicyEngine for DefaultPolicyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now_unix(&self) -> u64 {
+            1_000
+        }
+    }
 
     fn intent(to: TxKind, value: U256) -> TxIntent {
         TxIntent {
@@ -166,10 +196,13 @@ mod tests {
     async fn engine_composes_allow_guard_and_default_deny() {
         let a = Address::from([0xaa; 20]);
         let b = Address::from([0xbb; 20]);
-        let engine = DefaultPolicyEngine::new(vec![
-            Box::new(TargetAllowlist::new([a])),
-            Box::new(SpendLimit::new(U256::from(100u64))),
-        ]);
+        let engine = DefaultPolicyEngine::new(
+            vec![
+                Box::new(TargetAllowlist::new([a])),
+                Box::new(SpendLimit::new(U256::from(100u64))),
+            ],
+            Arc::new(FixedClock),
+        );
         let eval =
             async |to: TxKind, value: U256| engine.evaluate(&intent(to, value)).await.unwrap();
 
