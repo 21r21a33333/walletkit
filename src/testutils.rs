@@ -11,8 +11,8 @@ use crate::core::deps::{
     SubmissionError, SubmissionStrategy, Versioned,
 };
 use crate::core::wallet::{
-    AccountExecutor, Decision, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState,
-    PolicyApproval, PolicyRejection, TransactionManager, TxHandle, TxIntent, TxStatus,
+    AccountExecutor, Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope,
+    NonceState, PolicyApproval, PolicyRejection, TransactionManager, TxHandle, TxIntent, TxStatus,
 };
 use alloy_consensus::{
     Receipt, ReceiptEnvelope, ReceiptWithBloom, SignableTransaction, TxEip1559, TxLegacy,
@@ -481,6 +481,7 @@ impl StateStore for MockStore {
         _: NonceScope,
         _: u64,
         _: &NonceState,
+        _: FenceToken,
     ) -> Result<bool, StateStoreError> {
         unreachable!("nonce state is exercised via the real InMemoryStateStore")
     }

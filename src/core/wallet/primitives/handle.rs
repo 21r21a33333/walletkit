@@ -1,9 +1,10 @@
 use super::{GasEnvelope, IntentHash, TxIntent};
 use alloy_primitives::{Address, B256, Bytes, TxHash, keccak256};
+use serde::{Deserialize, Serialize};
 
 /// Stable, queryable id for a tracked transaction — derived from intent + nonce so
 /// it survives gas bumps (OZ `transactionId` / thirdweb `queueId` model).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HandleId(B256);
 
 impl HandleId {
@@ -21,7 +22,7 @@ impl HandleId {
 /// depth-gated finality of OZ Defender (12 confs) / thirdweb / Alchemy; `Replaced`
 /// on first sight would lose a tx whose nonce a reorg later frees.
 /// (`Dropped` arrives with the Send phase that can produce it.)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum TxStatus {
     Pending,
@@ -67,7 +68,7 @@ impl TxStatus {
 /// broadcast so it can be rebroadcast verbatim), with `fees`/`gas_limit` decoded from
 /// it on demand; `broadcasts` holds the original and each bump hash, so the mined hash
 /// distinguishes ours from a replacement; `last_broadcast_at` drives the bump timeout.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxHandle {
     pub id: HandleId,
     pub account: Address,

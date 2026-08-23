@@ -1,4 +1,4 @@
-use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
+use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};
 use alloy_primitives::Address;
 use async_trait::async_trait;
 
@@ -21,13 +21,21 @@ pub trait StateStore: Send + Sync {
         scope: NonceScope,
     ) -> Result<Versioned<NonceState>, StateStoreError>;
 
-    /// Store `state` iff the current version equals `expected_version`, bumping the
-    /// version. Returns `true` on success, `false` on a version conflict (caller retries).
+    /// Store `state` iff the current version equals `expected_version` **and** `fence` is
+    /// not below the highest fence committed for `scope`. On success, bump the version and
+    /// raise the stored fence to `max(stored, fence)`.
+    ///
+    /// Two independent guards: the **version** rejects lost updates (`Ok(false)` → the
+    /// caller retries); the **fence** rejects a superseded owner
+    /// (`Err(`[`StateStoreError::Fenced`]`)` → the caller stops, never retries). In
+    /// single-writer mode `fence` is always [`FenceToken::SINGLE_WRITER`], so the fence
+    /// check is a no-op.
     async fn cas_nonce_state(
         &self,
         scope: NonceScope,
         expected_version: u64,
         state: &NonceState,
+        fence: FenceToken,
     ) -> Result<bool, StateStoreError>;
 
     /// Persist a handle before its broadcast (persist-before-broadcast, so a crash
@@ -44,8 +52,25 @@ pub trait StateStore: Send + Sync {
     async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, StateStoreError>;
 }
 
-/// Variants grow with the store adapters (the in-memory store never errors; a
-/// durable backend adds I/O failures later).
+/// Failures a durable store surfaces. The in-memory store never errors; redb/Postgres do.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum StateStoreError {}
+pub enum StateStoreError {
+    /// A backend I/O / query failure (redb, Postgres, …). Retryable.
+    #[error("state store backend error: {source}")]
+    Backend {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// Encoding/decoding a persisted value failed (corrupt record / schema drift). Terminal.
+    #[error("state (de)serialization failed: {source}")]
+    Serialization {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The write carried a fence token lower than the highest committed for the scope — a
+    /// superseded owner. Terminal: the caller must stop, not retry.
+    #[error("write fenced: a newer owner holds this account")]
+    Fenced,
+    /// A blocking storage task (`spawn_blocking`) failed to join. Retryable.
+    #[error("storage task failed: {0}")]
+    Task(String),
+}

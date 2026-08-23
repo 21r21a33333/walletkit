@@ -1,9 +1,10 @@
 use super::IntentHash;
+use serde::{Deserialize, Serialize};
 
 /// The fee ceiling a policy approved for an intent. A gas bump whose fees stay
 /// within it reuses the same approval (no re-policy); a bump beyond it must be
 /// re-evaluated. Absolute wei caps — a policy decision independent of live fees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GasEnvelope {
     pub max_fee_cap: u128,
     pub max_priority_cap: u128,

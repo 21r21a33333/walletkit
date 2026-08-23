@@ -25,7 +25,7 @@
 use crate::core::deps::{
     NonceManager, NonceManagerError, Rpc, StateStore, StateStoreError, Versioned,
 };
-use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
+use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};
 use crate::obs::debug;
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ use std::sync::Arc;
 /// handles. Non-durable, so recovery is single-run (see the module docs).
 #[derive(Default)]
 pub struct InMemoryStateStore {
-    nonces: Mutex<HashMap<NonceScope, Versioned<NonceState>>>,
+    nonces: Mutex<HashMap<NonceScope, (Versioned<NonceState>, FenceToken)>>,
     handles: Mutex<HashMap<HandleId, TxHandle>>,
 }
 
@@ -47,7 +47,12 @@ impl StateStore for InMemoryStateStore {
         &self,
         scope: NonceScope,
     ) -> Result<Versioned<NonceState>, StateStoreError> {
-        Ok(self.nonces.lock().get(&scope).cloned().unwrap_or_default())
+        Ok(self
+            .nonces
+            .lock()
+            .get(&scope)
+            .map(|(v, _)| v.clone())
+            .unwrap_or_default())
     }
 
     async fn cas_nonce_state(
@@ -55,19 +60,27 @@ impl StateStore for InMemoryStateStore {
         scope: NonceScope,
         expected_version: u64,
         state: &NonceState,
+        fence: FenceToken,
     ) -> Result<bool, StateStoreError> {
         let mut nonces = self.nonces.lock();
-        let current = nonces.get(&scope).map_or(0, |v| v.version);
-        if current != expected_version {
+        let (cur_version, cur_fence) = nonces
+            .get(&scope)
+            .map_or((0, FenceToken::SINGLE_WRITER), |(v, f)| (v.version, *f));
+        if fence < cur_fence {
+            return Err(StateStoreError::Fenced);
+        }
+        if cur_version != expected_version {
             return Ok(false);
         }
-        nonces.insert(
-            scope,
+        // Past the guard, `fence >= cur_fence`, so it is already the new high-water mark.
+        let entry = (
             Versioned {
                 value: state.clone(),
                 version: expected_version + 1,
             },
+            fence,
         );
+        nonces.insert(scope, entry);
         Ok(true)
     }
 
@@ -94,11 +107,32 @@ impl StateStore for InMemoryStateStore {
 pub struct LocalNonceManager {
     store: Arc<dyn StateStore>,
     rpc: Arc<dyn Rpc>,
+    /// The fence carried on every CAS. Single-writer-per-account is the documented
+    /// default (SPEC §7); a distributed lease issuer will supply a real token later.
+    fence: FenceToken,
 }
 
 impl LocalNonceManager {
     pub fn new(store: Arc<dyn StateStore>, rpc: Arc<dyn Rpc>) -> Self {
-        Self { store, rpc }
+        Self {
+            store,
+            rpc,
+            fence: FenceToken::SINGLE_WRITER,
+        }
+    }
+
+    /// CAS the scope's state carrying this manager's fence, so the single-writer token is
+    /// threaded in one place rather than at every allocate/release/reset call site.
+    async fn cas(
+        &self,
+        scope: NonceScope,
+        version: u64,
+        value: &NonceState,
+    ) -> Result<bool, NonceManagerError> {
+        Ok(self
+            .store
+            .cas_nonce_state(scope, version, value, self.fence)
+            .await?)
     }
 }
 
@@ -122,7 +156,7 @@ impl NonceManager for LocalNonceManager {
                     n
                 }
             };
-            if self.store.cas_nonce_state(scope, version, &value).await? {
+            if self.cas(scope, version, &value).await? {
                 debug!(nonce, "nonce assigned");
                 return Ok(nonce);
             }
@@ -145,7 +179,7 @@ impl NonceManager for LocalNonceManager {
             } else {
                 value.free.insert(nonce); // a middle gap: recycle it later
             }
-            if self.store.cas_nonce_state(scope, version, &value).await? {
+            if self.cas(scope, version, &value).await? {
                 return Ok(());
             }
         }
@@ -157,7 +191,7 @@ impl NonceManager for LocalNonceManager {
             let Versioned { mut value, version } = self.store.load_nonce_state(scope).await?;
             value.next = value.next.max(chain_next); // forward only
             value.free.retain(|&n| n >= chain_next); // drop freed nonces consumed on-chain
-            if self.store.cas_nonce_state(scope, version, &value).await? {
+            if self.cas(scope, version, &value).await? {
                 debug!(chain_next, "nonce reconciled to chain");
                 return Ok(());
             }
@@ -247,7 +281,12 @@ mod tests {
             next: 100,
             free: BTreeSet::from([74, 75, 150]),
         };
-        assert!(store.cas_nonce_state(scope, 0, &seeded).await.unwrap());
+        assert!(
+            store
+                .cas_nonce_state(scope, 0, &seeded, FenceToken::SINGLE_WRITER)
+                .await
+                .unwrap()
+        );
 
         m.reset(a, 75).await.unwrap();
 
@@ -260,6 +299,29 @@ mod tests {
         assert_eq!(m.allocate(a).await.unwrap(), 150);
         assert_eq!(m.allocate(a).await.unwrap(), 100);
         assert_eq!(m.allocate(a).await.unwrap(), 101);
+    }
+
+    #[tokio::test]
+    async fn cas_rejects_a_lower_fence_and_raises_the_high_water() {
+        // The fence is a monotonic reject-if-lower guard (single-writer sentinel is a
+        // no-op; a higher token raises the high-water mark and fences out the sentinel).
+        let store = InMemoryStateStore::default();
+        let scope = NonceScope::eoa(Address::ZERO);
+        let s = NonceState::default();
+        assert!(
+            store
+                .cas_nonce_state(scope, 0, &s, FenceToken::SINGLE_WRITER)
+                .await
+                .unwrap()
+        );
+        let higher = FenceToken::for_test(1);
+        assert!(store.cas_nonce_state(scope, 1, &s, higher).await.unwrap());
+        assert!(matches!(
+            store
+                .cas_nonce_state(scope, 2, &s, FenceToken::SINGLE_WRITER)
+                .await,
+            Err(StateStoreError::Fenced)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

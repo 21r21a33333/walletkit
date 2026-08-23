@@ -11,7 +11,7 @@ pub use executor::{
     transition,
 };
 pub use primitives::{
-    Decision, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState, PolicyApproval,
-    PolicyRejection, TxHandle, TxIntent, TxStatus,
+    Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState,
+    PolicyApproval, PolicyRejection, TxHandle, TxIntent, TxStatus,
 };
 pub use transaction_manager::{TransactionManager, TransactionManagerError};
