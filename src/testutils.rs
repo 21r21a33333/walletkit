@@ -168,6 +168,9 @@ pub(crate) struct MockRpc {
     pub base_fee: u128,
     pub receipt: Option<TransactionReceipt>,
     pub receipts: HashMap<TxHash, TransactionReceipt>,
+    /// When set, `receipt()` returns a transient error — for the read-robustness path
+    /// where an ambiguous receipt read must become `ChainEvent::Unknown`.
+    pub receipt_err: bool,
     pub canonical: Option<B256>,
     pub gas_reverts: bool,
     pub log: CallLog,
@@ -212,6 +215,12 @@ impl Rpc for MockRpc {
         Ok(TxHash::ZERO)
     }
     async fn receipt(&self, hash: TxHash) -> Result<Option<TransactionReceipt>, RpcError> {
+        if self.receipt_err {
+            return Err(RpcError::Call {
+                message: "receipt read failed".into(),
+                transient: true,
+            });
+        }
         match self.receipts.get(&hash) {
             Some(receipt) => Ok(Some(receipt.clone())),
             None => Ok(self.receipt.clone()),

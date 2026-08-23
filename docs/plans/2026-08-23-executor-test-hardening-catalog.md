@@ -92,8 +92,7 @@ guards. The existing 8 localnet scenarios remain the integration backstop.
 - [ ] **`sign_failure_recycles_nonce_leaving_no_gap_next_send_reuses_it`** — *low*
   - Release-on-sign-fail re-enters the freed nonce into the allocable set. Real allocator + shared store, `pending_nonce:5`, `MockSigner{ok:false}`. First `send()` ⇒ `Err(Signer(..))` with call-log allocate→release (no submit); a second `MockSigner{ok:true}` manager over the same store reuses the exact nonce, `next` unchanged. Don't assert `free=={5}` (single alloc takes top-shrink). To cover the middle-gap `insert`+recycle (nonce_store:144, 113-116), allocate 5 and 6 and fail on the lower; else redundant with `release_middle_recycles_lowest_first`.
 
-- [ ] **`recover_store_read_error_aborts_the_cycle`** — *medium* — *needs `MockStore.fail_reads`*
-  - With `fail_reads` set + a seeded handle, `recover().await == Err(Store(_))` (the `?` at mod.rs:140 propagates). Don't lean on `submit.seen` empty (trivially so). Pin the submit-swallow contract separately (good read + `Submit::Transient` + Sent handle ⇒ `is_ok()` + seen holds that rlp).
+- [ ] ~~**`recover_store_read_error_aborts_the_cycle`**~~ — **DROPPED (YAGNI)**. `StateStoreError` is a deliberately empty, `#[non_exhaustive]` enum — the only store (in-memory) never errors, and the crate has not defined an I/O variant yet ("a durable backend adds I/O failures later"). The type is uninhabited, so `MockStore.fail_reads` cannot construct an `Err` to return. The `?` at mod.rs:140 is real code, but propagates a type with no inhabitants in Phase 1. This test earns its place only when a durable `StateStore` (Phase 3) adds real I/O errors; revisit then.
 
 ---
 
@@ -104,7 +103,7 @@ guards. The existing 8 localnet scenarios remain the integration backstop.
 | **Per-hash receipt map on `MockRpc`** | newest-wins, bump-then-original | Add `receipts: HashMap<TxHash, TransactionReceipt>` consulted before the scalar `receipt` field (~10 lines). Tests must build handles with distinct non-zero `TxHash`es. Unblocks both replacement-attribution tests. |
 | **`receipt()` can return `Err`** | receipt-read-error | Add `receipt_err: bool`; return `Err(RpcError::Call{transient:true})` at top of `receipt()` (~5 lines). |
 | **Sequenced `block_number` + logging `MockNonceManager`** | head-regression | `block_numbers: Mutex<VecDeque<u64>>` consumed FIFO (fallback last value), so one executor sees head 100 then 90 (~15 lines); + a call-logging `MockNonceManager` to assert `reset` not called in cycle 2. |
-| **`MockStore` can fail reads** | store-read-error | `fail_reads: bool`; `pending_handles()` returns `Err`, keep `put_handle`/`handle` working (additive). |
+| ~~**`MockStore` can fail reads**~~ | ~~store-read-error~~ | **Not built** — `StateStoreError` is uninhabited (empty enum), so no `Err` can be constructed. See the dropped test above (YAGNI). |
 
 `receipt_missing_block_anchor`, both `decode_fees` tests, and the CAS/nonce tests are `harness_feasible: true` (inline fixtures / real allocator) — no harness change.
 
@@ -117,5 +116,5 @@ guards. The existing 8 localnet scenarios remain the integration backstop.
 3. **Bump decode + submit + persistence** (inline fixtures): both `decode_fees`, `bump_transient_submit_error`, `repeated_bumps_across_ticks`, `bump_records...persists_new_hash`, `receipt_missing_block_anchor`.
 4. **Recovery + nonce allocator** (real allocator/existing mocks): 3 recover tests, `reset_retains_high_freed_nonce`, `sign_failure_recycles_nonce`.
 5. **Harness: per-hash receipt map** → the 2 RBF-attribution tests.
-6. **Harness: fallible receipt + fallible store read** → `receipt_read_error` (*high*), `recover_store_read_error`.
+6. **Harness: fallible receipt** → `receipt_read_error` (*high*). (`recover_store_read_error` dropped — YAGNI, see above.)
 7. **Harness: sequenced head + logging nonce mgr** → `regressed_head_between_cycles`. Last: most involved harness change, medium-value guard.

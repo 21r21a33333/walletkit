@@ -1096,6 +1096,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_read_error_yields_unknown_holds_state() {
+        // A transient receipt-RPC error must be a no-op (Unknown), never misread as "not
+        // mined" — which would rewind a mined handle. The nonce is consumed (tx_count 5 >
+        // 4), so the only thing preventing a state change is the Err->Unknown short-circuit.
+        let h1 = B256::repeat_byte(1);
+        let mined = TxStatus::Mined {
+            block: 8,
+            block_hash: h1,
+        };
+
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, mined.clone())).await.unwrap();
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 5,
+                block_number: 20,
+                receipt_err: true,
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .confirmations(2)
+            .executor()
+            .confirm()
+            .await
+            .unwrap();
+        assert_eq!(store.all()[0].status, mined); // unchanged
+
+        // Distinctness: same view, a clean None read instead lets the nonce path apply
+        // (nonce 4 < 5 -> Replaced), so the Err path is observably different from None.
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&handle(4, mined.clone())).await.unwrap();
+        run_confirm(&store, 5, 20, None, None, 2).await;
+        assert_eq!(
+            store.all()[0].status,
+            TxStatus::Replacing { since_block: 20 }
+        );
+    }
+
+    #[tokio::test]
     async fn receipt_missing_block_anchor_yields_unknown() {
         // A receipt with no block anchor (or only one of the two fields) is the
         // pending/partial shape: anchor()'s tuple-destructure guard makes it Unknown and
