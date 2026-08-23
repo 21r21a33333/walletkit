@@ -1,4 +1,4 @@
-use super::IntentHash;
+use alloy_primitives::B256;
 use serde::{Deserialize, Serialize};
 
 /// The fee ceiling a policy approved for an intent. A gas bump whose fees stay
@@ -23,35 +23,31 @@ impl GasEnvelope {
     }
 }
 
-/// Unforgeable proof that a specific [`TxIntent`](super::TxIntent) passed policy.
-/// Minted only by the policy layer (crate-private) and not `Serialize`, so it can't
-/// be persisted and replayed; `Signer::sign` requires one, making the policy→sign
-/// gate structural. Bounded, not single-use: valid for any fees within
-/// `gas_envelope` until `valid_until`, so the executor can bump within it without
+/// Unforgeable proof that a specific signing payload (a tx intent, an EIP-191 message, or
+/// EIP-712 typed data) passed policy. Minted only by the policy layer (crate-private) and
+/// not `Serialize`, so it can't be persisted and replayed; the `Signer` requires one, making
+/// the policy→sign gate structural. Bounded, not single-use: valid for any fees within
+/// `gas_envelope` (tx-only) until `valid_until`, so the executor can bump within it without
 /// re-running policy (§5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyApproval {
-    intent_hash: IntentHash,
+    payload_hash: B256,
     gas_envelope: GasEnvelope,
     valid_until: u64,
 }
 
 impl PolicyApproval {
-    /// Minted only by the policy layer (crate-private) after an intent is allowed.
-    pub(crate) fn mint(
-        intent_hash: IntentHash,
-        gas_envelope: GasEnvelope,
-        valid_until: u64,
-    ) -> Self {
+    /// Minted only by the policy layer (crate-private) after a payload is allowed.
+    pub(crate) fn mint(payload_hash: B256, gas_envelope: GasEnvelope, valid_until: u64) -> Self {
         Self {
-            intent_hash,
+            payload_hash,
             gas_envelope,
             valid_until,
         }
     }
 
-    pub fn authorizes(&self, intent_hash: IntentHash) -> bool {
-        self.intent_hash == intent_hash
+    pub fn authorizes(&self, payload_hash: B256) -> bool {
+        self.payload_hash == payload_hash
     }
 
     pub fn gas_envelope(&self) -> GasEnvelope {
@@ -80,7 +76,6 @@ pub struct PolicyRejection {
 pub enum Decision {
     Allow(PolicyApproval),
     Deny(PolicyRejection),
-    // RequireApproval { quorum } grows in Phase 3
 }
 
 #[cfg(test)]
