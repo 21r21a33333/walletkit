@@ -10,12 +10,13 @@ use crate::core::deps::{
     SubmissionError, SubmissionStrategy,
 };
 use crate::core::wallet::{
-    Decision, HandleId, PolicyApproval, PolicyRejection, SigningRequest, TxHandle, TxIntent,
-    TxStatus,
+    Decision, HandleId, PolicyApproval, PolicyRejection, SignatureEnvelope, SigningRequest,
+    TxHandle, TxIntent, TxStatus,
 };
 use crate::obs::{debug, error, info, warn};
+use alloy_dyn_abi::TypedData;
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use std::sync::Arc;
 
@@ -68,6 +69,65 @@ impl TransactionManager {
     pub fn with_gas_buffer_pct(mut self, pct: u128) -> Self {
         self.gas_buffer_pct = pct;
         self
+    }
+
+    /// Sign an EIP-191 `personal_sign` message through the policy gate. Blind signing is
+    /// impossible: the message is `0x19`-prefixed and default-denied unless a rule allows it.
+    /// `skip_all` is mandatory — only the safe `payload_hash` is recorded, never the message.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sign_message",
+            level = "debug",
+            skip_all,
+            fields(payload_hash = %alloy_primitives::eip191_hash_message(message))
+        )
+    )]
+    pub async fn sign_message(
+        &self,
+        message: &[u8],
+    ) -> Result<SignatureEnvelope, TransactionManagerError> {
+        let request = SigningRequest::Message(Bytes::copy_from_slice(message));
+        let approval = self.authorize(&request).await?;
+        Ok(self
+            .signer
+            .sign_message(message, &approval, self.clock.now_unix())
+            .await?)
+    }
+
+    /// Sign EIP-712 typed data through the policy gate (domain `chainId` validated in the
+    /// signer). A domain not on an allowlisted `verifyingContract` is default-denied.
+    /// `skip_all` keeps the typed-data content out of telemetry; only the hash is recorded.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sign_typed_data",
+            level = "debug",
+            skip_all,
+            fields(payload_hash = ?typed.eip712_signing_hash().ok())
+        )
+    )]
+    pub async fn sign_typed_data(
+        &self,
+        typed: &TypedData,
+    ) -> Result<SignatureEnvelope, TransactionManagerError> {
+        let request = SigningRequest::TypedData(Box::new(typed.clone()));
+        let approval = self.authorize(&request).await?;
+        Ok(self
+            .signer
+            .sign_typed_data(typed, &approval, self.clock.now_unix())
+            .await?)
+    }
+
+    /// Run the policy gate for a signing request, returning the minted approval or a denial.
+    async fn authorize(
+        &self,
+        request: &SigningRequest,
+    ) -> Result<PolicyApproval, TransactionManagerError> {
+        match self.policy.evaluate(request).await? {
+            Decision::Allow(approval) => Ok(approval),
+            Decision::Deny(rejection) => Err(TransactionManagerError::Denied(rejection)),
+        }
     }
 
     /// Estimate (also the pre-sign revert gate) → fees → policy → allocate → build →

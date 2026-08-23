@@ -9,9 +9,10 @@ use crate::adapters::{
 };
 use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use crate::core::wallet::{
-    AccountExecutor, HandleId, TransactionManager, TxHandle, TxIntent, TxStatus,
+    AccountExecutor, HandleId, SignatureEnvelope, TransactionManager, TxHandle, TxIntent, TxStatus,
 };
 use crate::error::WalletKitError;
+use alloy_dyn_abi::TypedData;
 use alloy_primitives::Address;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +22,7 @@ use tokio::task::JoinHandle;
 /// A per-account wallet runtime. Build it with [`Wallet::builder`], `send` intents,
 /// query `status`, and drive `tick` (or `run`) to confirm and bump.
 pub struct Wallet {
-    pipeline: TransactionManager,
+    manager: TransactionManager,
     executor: AccountExecutor,
     store: Arc<dyn StateStore>,
     account: Address,
@@ -57,7 +58,22 @@ impl Wallet {
     /// Build, sign, and submit an intent, returning its tracked handle. Tracking,
     /// bumping, and confirmation happen on later [`tick`](Wallet::tick)s.
     pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, WalletKitError> {
-        Ok(self.pipeline.send(intent).await?)
+        Ok(self.manager.send(intent).await?)
+    }
+
+    /// Sign an EIP-191 `personal_sign` message (policy-gated; default-denied unless a rule
+    /// allows message signing).
+    pub async fn sign_message(&self, message: &[u8]) -> Result<SignatureEnvelope, WalletKitError> {
+        Ok(self.manager.sign_message(message).await?)
+    }
+
+    /// Sign EIP-712 typed data (policy-gated; the domain `chainId` must be present and match
+    /// a signable chain, and the `verifyingContract` must be allowlisted).
+    pub async fn sign_typed_data(
+        &self,
+        typed: &TypedData,
+    ) -> Result<SignatureEnvelope, WalletKitError> {
+        Ok(self.manager.sign_typed_data(typed).await?)
     }
 
     /// The full tracked handle by id (terminal-inclusive), or `None` if the id is
@@ -179,7 +195,7 @@ impl WalletBuilder {
         let nonce_manager = Arc::new(LocalNonceManager::new(store.clone(), self.rpc.clone()));
         let submission = Arc::new(PublicMempool::new(self.rpc.clone()));
 
-        let mut pipeline = TransactionManager::new(
+        let mut manager = TransactionManager::new(
             self.rpc.clone(),
             gas_oracle.clone(),
             self.policy.clone(),
@@ -190,7 +206,7 @@ impl WalletBuilder {
             clock.clone(),
         );
         if let Some(pct) = self.gas_buffer_pct {
-            pipeline = pipeline.with_gas_buffer_pct(pct);
+            manager = manager.with_gas_buffer_pct(pct);
         }
 
         let mut executor = AccountExecutor::new(
@@ -212,7 +228,7 @@ impl WalletBuilder {
         }
 
         Wallet {
-            pipeline,
+            manager,
             executor,
             store,
             account,
@@ -242,5 +258,42 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), running.stop())
             .await
             .expect("loop did not stop within 2s");
+    }
+
+    #[tokio::test]
+    async fn sign_message_is_policy_gated_end_to_end() {
+        use crate::adapters::LocalSigner;
+        use crate::adapters::SystemClock;
+        use crate::adapters::policy::{
+            DefaultPolicyEngine, MessageSigningAllowed, TargetAllowlist,
+        };
+
+        const MNEMONIC: &str = "test test test test test test test test test test test junk";
+        let signer = Arc::new(LocalSigner::from_mnemonic(MNEMONIC, 0).unwrap());
+        let account = signer.address();
+        let msg = b"siwe login nonce";
+
+        // A message rule grants -> the envelope recovers to the wallet's account.
+        let allow = Arc::new(DefaultPolicyEngine::new(
+            vec![Box::new(MessageSigningAllowed)],
+            Arc::new(SystemClock),
+        ));
+        let wallet = Wallet::builder(Arc::new(MockRpc::default()), signer.clone(), allow).build();
+        let env = wallet.sign_message(msg).await.expect("sign");
+        assert_eq!(
+            env.signature().recover_address_from_msg(msg).unwrap(),
+            account
+        );
+
+        // No message rule -> default-deny surfaces as WalletKitError::Policy.
+        let deny = Arc::new(DefaultPolicyEngine::new(
+            vec![Box::new(TargetAllowlist::new([]))],
+            Arc::new(SystemClock),
+        ));
+        let gated = Wallet::builder(Arc::new(MockRpc::default()), signer, deny).build();
+        assert!(matches!(
+            gated.sign_message(msg).await,
+            Err(WalletKitError::Policy(_))
+        ));
     }
 }
