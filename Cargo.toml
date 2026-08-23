@@ -36,14 +36,20 @@ time = { version = "0.3", features = ["parsing"], optional = true }
 # runtime for the facade's opt-in `run(interval)` background tick loop.
 tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros"] }
 tower = "0.5.3"
+# Observability: emit-only (the host installs the subscriber/exporter). Optional but on by
+# default; a `default-features = false` build strips it to no-ops via src/obs.rs.
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std", "attributes", "log"] }
 url = { version = "2.5.8", features = ["serde"] }
 wasmtime = { version = "36", optional = true }
 wasmtime-wasi = { version = "36", optional = true }
 zeroize = "1.9.0"
 
 [features]
+default = ["tracing"]
+tracing = ["dep:tracing"]
 policy-moonpay = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:time"]
 
 [dev-dependencies]
 alloy-node-bindings = "2.4.1"
 tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
