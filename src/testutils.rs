@@ -416,6 +416,9 @@ impl StateStore for MockStore {
             .cloned()
             .collect())
     }
+    async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, StateStoreError> {
+        Ok(self.handles.lock().iter().find(|h| h.id == id).cloned())
+    }
     async fn load_nonce_state(
         &self,
         _: NonceScope,

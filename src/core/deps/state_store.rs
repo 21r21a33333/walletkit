@@ -1,4 +1,4 @@
-use crate::core::wallet::{NonceScope, NonceState, TxHandle};
+use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
 use alloy_primitives::Address;
 use async_trait::async_trait;
 
@@ -37,6 +37,11 @@ pub trait StateStore: Send + Sync {
     /// Non-terminal handles for `account`, for the executor to recover/track. The
     /// crash-recovery read: on boot these are the in-flight txs to rebroadcast.
     async fn pending_handles(&self, account: Address) -> Result<Vec<TxHandle>, StateStoreError>;
+
+    /// A handle by id, **including terminal** ones (unlike [`pending_handles`]) — the
+    /// status-query read: a `Confirmed`/`Failed`/`Replaced` handle is gone from
+    /// `pending_handles` but still queryable here.
+    async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, StateStoreError>;
 }
 
 /// Variants grow with the store adapters (the in-memory store never errors; a

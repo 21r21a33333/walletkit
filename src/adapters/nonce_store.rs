@@ -84,6 +84,10 @@ impl StateStore for InMemoryStateStore {
             .cloned()
             .collect())
     }
+
+    async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, StateStoreError> {
+        Ok(self.handles.lock().get(&id).cloned())
+    }
 }
 
 pub struct LocalNonceManager {
@@ -256,5 +260,23 @@ mod tests {
         let pending = store.pending_handles(acct).await.unwrap();
         assert_eq!(pending.len(), 1); // only the Sent one; terminal excluded
         assert_eq!(pending[0].nonce, 1);
+    }
+
+    #[tokio::test]
+    async fn handle_returns_by_id_including_terminal() {
+        let store = InMemoryStateStore::default();
+        let sent = handle(1, TxStatus::Sent);
+        let done = handle(2, TxStatus::Confirmed { block: 9 });
+        store.put_handle(&sent).await.unwrap();
+        store.put_handle(&done).await.unwrap();
+
+        assert_eq!(store.handle(sent.id).await.unwrap().unwrap().nonce, 1);
+        // terminal handles are gone from pending_handles but still readable by id:
+        assert_eq!(
+            store.handle(done.id).await.unwrap().unwrap().status,
+            TxStatus::Confirmed { block: 9 }
+        );
+        let missing = handle(99, TxStatus::Sent).id;
+        assert!(store.handle(missing).await.unwrap().is_none());
     }
 }
