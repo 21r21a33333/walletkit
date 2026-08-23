@@ -43,6 +43,20 @@ impl PostgresStateStore {
             .map_err(backend)?;
         Ok(Self { pool })
     }
+
+    /// Delete all persisted state for `account` — decommissioning, and the clean-slate reset
+    /// the integration harness needs before reusing an account against a shared database.
+    pub async fn clear_account(&self, account: Address) -> Result<(), StateStoreError> {
+        let account = account_key(&account);
+        for table in ["nonce_state", "tx_handles"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account = $1"))
+                .bind(&account)
+                .execute(&self.pool)
+                .await
+                .map_err(backend)?;
+        }
+        Ok(())
+    }
 }
 
 fn backend<E: std::error::Error + Send + Sync + 'static>(e: E) -> StateStoreError {

@@ -29,7 +29,39 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The trait + InMemoryStateStore must still compile with every backend/tracing
+      # feature stripped (the embedded-nothing path a minimal dependent builds).
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
       # localnet integration tests skip cleanly when anvil/Foundry is absent, so the
       # full suite runs here without a node.
       - name: Test
         run: cargo test --all-targets
+
+  postgres:
+    name: postgres backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: walletkit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      # The `postgres` conformance test connects here; absent this, it skips.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/walletkit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (postgres)
+        run: cargo clippy --all-targets --features postgres -- -D warnings
+      - name: Test (postgres)
+        run: cargo test --all-targets --features postgres
