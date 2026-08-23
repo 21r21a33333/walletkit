@@ -9,6 +9,9 @@
 
 pub mod adapters;
 pub mod core;
+pub mod facade;
+
+pub use facade::{Wallet, WalletBuilder, WalletError};
 
 #[cfg(test)]
 pub(crate) mod testutils;
