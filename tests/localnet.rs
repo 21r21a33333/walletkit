@@ -253,3 +253,24 @@ async fn reorg_unmines_without_false_confirm_then_recovers() {
     }
     assert!(recovered, "tx should recover to Confirmed after the reorg");
 }
+
+#[tokio::test]
+async fn restart_reconciles_a_tx_mined_during_downtime() {
+    let net = localnet!();
+
+    // Send, then the tx mines while the original wallet never ticks ("downtime").
+    let handle = net.wallet.send(&net.intent(1)).await.expect("send");
+    net.mine(3).await;
+
+    // Restart: a fresh wallet over the SAME store recovers and confirms it from the
+    // persisted handle — no rebroadcast needed since it already mined.
+    let restarted = net.rebuild_wallet();
+    restarted.tick().await.expect("tick after restart");
+    assert!(
+        matches!(
+            restarted.status(handle.id).await.expect("status"),
+            Some(TxStatus::Confirmed { .. })
+        ),
+        "restarted wallet should reconcile the mined tx to Confirmed"
+    );
+}

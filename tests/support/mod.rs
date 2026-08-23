@@ -7,10 +7,11 @@ use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{Address, TxKind, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use std::sync::Arc;
+use url::Url;
 use walletkit::Wallet;
 use walletkit::adapters::policy::{DefaultPolicyEngine, TargetAllowlist};
-use walletkit::adapters::{LocalSigner, SystemClock, Transport};
-use walletkit::core::deps::{Clock, PolicyEngine, Signer};
+use walletkit::adapters::{InMemoryStateStore, LocalSigner, SystemClock, Transport};
+use walletkit::core::deps::{Clock, PolicyEngine};
 use walletkit::core::wallet::TxIntent;
 
 /// Anvil's default dev mnemonic (Foundry default) — account 0 is funded.
@@ -26,6 +27,10 @@ pub struct Localnet {
     /// Raw alloy provider for chain control (mining, reorg, external txs).
     pub control: DynProvider,
     pub account: Address,
+    /// Kept so a restart can rebuild a fresh wallet over the same persisted state.
+    store: Arc<InMemoryStateStore>,
+    endpoint: Url,
+    confirmations: u64,
 }
 
 impl Localnet {
@@ -45,30 +50,31 @@ impl Localnet {
             .arg("1")
             .try_spawn()
             .ok()?;
-        let url = anvil.endpoint_url();
-
-        let signer = LocalSigner::from_mnemonic(ANVIL_MNEMONIC, 0).ok()?;
-        let account = signer.address();
-        let transport = Transport::single(url.clone()).ok()?;
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(
-            vec![Box::new(TargetAllowlist::new([RECIPIENT]))],
-            clock,
-        ));
-
-        let wallet = Wallet::builder(Arc::new(transport), Arc::new(signer), policy)
-            .confirmations(confirmations)
-            .bump_timeout(0)
-            .gas_ceiling(u128::MAX)
-            .build();
-
-        let control = ProviderBuilder::new().connect_http(url).erased();
+        let endpoint = anvil.endpoint_url();
+        let store = Arc::new(InMemoryStateStore::default());
+        let wallet = build_wallet(&endpoint, store.clone(), confirmations)?;
+        let account = wallet.account();
+        let control = ProviderBuilder::new()
+            .connect_http(endpoint.clone())
+            .erased();
         Some(Localnet {
             _anvil: anvil,
             wallet: Arc::new(wallet),
             control,
             account,
+            store,
+            endpoint,
+            confirmations,
         })
+    }
+
+    /// Rebuild a fresh `Wallet` over the **same** store — simulates a restart (a new
+    /// process picking up the persisted in-flight handles).
+    pub fn rebuild_wallet(&self) -> Arc<Wallet> {
+        Arc::new(
+            build_wallet(&self.endpoint, self.store.clone(), self.confirmations)
+                .expect("rebuild wallet"),
+        )
     }
 
     /// A value-transfer intent from this wallet's account to the allowlisted recipient.
@@ -144,4 +150,27 @@ impl Localnet {
             .await
             .expect("foreign tx submit");
     }
+}
+
+/// Build a `Wallet` over account 0, an allow-`RECIPIENT` policy, and the given store.
+fn build_wallet(
+    endpoint: &Url,
+    store: Arc<InMemoryStateStore>,
+    confirmations: u64,
+) -> Option<Wallet> {
+    let signer = LocalSigner::from_mnemonic(ANVIL_MNEMONIC, 0).ok()?;
+    let transport = Transport::single(endpoint.clone()).ok()?;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(
+        vec![Box::new(TargetAllowlist::new([RECIPIENT]))],
+        clock,
+    ));
+    Some(
+        Wallet::builder(Arc::new(transport), Arc::new(signer), policy)
+            .confirmations(confirmations)
+            .bump_timeout(0)
+            .gas_ceiling(u128::MAX)
+            .store(store)
+            .build(),
+    )
 }
