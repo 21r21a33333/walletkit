@@ -17,6 +17,7 @@ use crate::core::deps::{
     SubmissionError, SubmissionStrategy,
 };
 use crate::core::wallet::{Decision, HandleId, PolicyApproval, TxHandle, TxStatus};
+use crate::obs::{debug, info, warn};
 use alloy_consensus::TxEnvelope;
 use alloy_eips::Decodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
@@ -126,6 +127,10 @@ impl AccountExecutor {
 
     /// One executor cycle: recover in-flight txs, confirm progress, bump the stuck.
     /// The host calls this per `Clock` tick.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "wallet.tick", level = "debug", skip_all)
+    )]
     pub async fn tick(&self) -> Result<(), ExecutorError> {
         self.recover().await?;
         self.confirm().await?;
@@ -164,7 +169,14 @@ impl AccountExecutor {
             else {
                 continue;
             };
-            handle.status = next;
+            // `_prev` is read only by the transition events below; the underscore keeps a
+            // `--no-default-features` build (where the obs macros are no-ops) warning-free.
+            let _prev = std::mem::replace(&mut handle.status, next);
+            if handle.status.is_terminal() {
+                info!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "transaction settled");
+            } else {
+                debug!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "status advanced");
+            }
             // A terminal handle no longer needs its cached approval.
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
                 self.approvals.lock().remove(&handle.id);
@@ -257,6 +269,14 @@ impl AccountExecutor {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            level = "debug",
+            skip_all,
+            fields(intent_hash = ?handle.intent_hash, nonce = handle.nonce, bump_count = handle.broadcasts.len())
+        )
+    )]
     async fn bump(&self, handle: &mut TxHandle, now: u64) -> Result<(), ExecutorError> {
         // Re-check right before bumping: if the nonce mined since the handle was
         // selected, don't broadcast a doomed replacement — Confirm will settle it.
@@ -270,7 +290,10 @@ impl AccountExecutor {
         let bumped = match self.gas_oracle.bump(fees).await {
             Ok(fees) => fees,
             // At the ceiling we stop and leave the tx as-is (an operator signal, not a retry).
-            Err(GasOracleError::CeilingExceeded { .. }) => return Ok(()),
+            Err(GasOracleError::CeilingExceeded { .. }) => {
+                warn!(intent_hash = ?handle.intent_hash, "bump halted at gas ceiling");
+                return Ok(());
+            }
             Err(e) => return Err(e.into()),
         };
         // The originally-approved envelope is a hard per-intent spend ceiling. A bump
@@ -280,6 +303,7 @@ impl AccountExecutor {
             .envelope
             .admits(bumped.max_fee_per_gas, bumped.max_priority_fee_per_gas)
         {
+            warn!(intent_hash = ?handle.intent_hash, "bump halted at approval envelope");
             return Ok(());
         }
         let Some(approval) = self.bump_approval(handle, bumped, now).await? else {
@@ -301,6 +325,7 @@ impl AccountExecutor {
         handle.last_broadcast_at = now;
         self.state_store.put_handle(handle).await?;
         self.approvals.lock().insert(handle.id, approval);
+        warn!(intent_hash = ?handle.intent_hash, nonce = handle.nonce, "bumped fees (RBF)");
         Ok(())
     }
 

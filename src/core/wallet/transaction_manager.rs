@@ -12,6 +12,7 @@ use crate::core::deps::{
 use crate::core::wallet::{
     Decision, HandleId, PolicyApproval, PolicyRejection, TxHandle, TxIntent, TxStatus,
 };
+use crate::obs::{debug, error, info, warn};
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::Address;
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
@@ -71,6 +72,15 @@ impl TransactionManager {
     /// Estimate (also the pre-sign revert gate) → fees → policy → allocate → build →
     /// sign → persist → submit. A nonce is allocated only after policy Allow and
     /// released if any later step fails, so a denied or failed send never leaves a gap.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "wallet.send",
+            level = "info",
+            skip_all,
+            fields(intent_hash = ?intent.hash(), account = %intent.account, chain_id = intent.chain_id)
+        )
+    )]
     pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, TransactionManagerError> {
         let account = intent.account;
         // The nonce is allocated for `account`; signing with a different key would put
@@ -108,6 +118,7 @@ impl TransactionManager {
         };
 
         let nonce = self.nonce_manager.allocate(account).await?;
+        debug!(nonce, "nonce allocated");
         // `build_sign_submit` owns the nonce lifecycle: it recycles the nonce only when
         // nothing was broadcast, so a live tx's nonce is never freed for reuse.
         self.build_sign_submit(intent, gas_limit, fees, nonce, approval)
@@ -165,6 +176,7 @@ impl TransactionManager {
             Err(e) if e.is_transient() || e.is_already_accepted() => {
                 handle.status = TxStatus::Sent;
                 let _ = self.state_store.put_handle(&handle).await;
+                warn!(nonce, "submission indeterminate; assuming sent");
                 return Ok(handle);
             }
             // Deterministic reject: definitely not broadcast -> terminalize + recycle.
@@ -174,6 +186,7 @@ impl TransactionManager {
                 };
                 let _ = self.state_store.put_handle(&handle).await;
                 let _ = self.nonce_manager.release(account, nonce).await;
+                error!(error = %e, nonce, "submission rejected; nonce recycled");
                 return Err(e.into());
             }
         }
@@ -182,6 +195,7 @@ impl TransactionManager {
         // nonce — the tx is live, and freeing its nonce would enable reuse.
         handle.status = TxStatus::Sent;
         let _ = self.state_store.put_handle(&handle).await;
+        info!(tx_hash = ?tx_hash, nonce, "transaction submitted");
         Ok(handle)
     }
 

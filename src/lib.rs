@@ -9,9 +9,13 @@
 
 pub mod adapters;
 pub mod core;
+pub mod error;
 pub mod facade;
 
-pub use facade::{Runner, Wallet, WalletBuilder, WalletError};
+pub(crate) mod obs;
+
+pub use error::{ErrorKind, WalletKitError};
+pub use facade::{Runner, Wallet, WalletBuilder};
 
 #[cfg(test)]
 pub(crate) mod testutils;

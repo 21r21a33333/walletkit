@@ -3,6 +3,7 @@
 //! cited at their definitions.
 
 use crate::core::deps::{GasOracle, GasOracleError, Rpc};
+use crate::obs::warn;
 use alloy_eips::eip1559::Eip1559Estimation;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -53,6 +54,11 @@ impl GasOracle for RpcGasOracle {
         let max_fee = rbf_cap.max(coverage);
 
         if max_fee > self.ceiling_max_fee {
+            warn!(
+                needed = max_fee,
+                ceiling = self.ceiling_max_fee,
+                "gas bump would exceed ceiling"
+            );
             return Err(GasOracleError::CeilingExceeded {
                 ceiling: self.ceiling_max_fee,
                 needed: max_fee,

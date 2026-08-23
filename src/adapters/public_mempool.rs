@@ -3,6 +3,7 @@
 //! strategies without touching the pipeline.
 
 use crate::core::deps::{Rpc, SubmissionError, SubmissionStrategy};
+use crate::obs::debug;
 use alloy_primitives::{Bytes, TxHash};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ impl PublicMempool {
 #[async_trait]
 impl SubmissionStrategy for PublicMempool {
     async fn submit(&self, signed_rlp: Bytes) -> Result<TxHash, SubmissionError> {
+        debug!("broadcasting signed transaction");
         Ok(self.rpc.send_raw(signed_rlp).await?)
     }
 }
