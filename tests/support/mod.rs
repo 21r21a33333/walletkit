@@ -73,11 +73,17 @@ impl Localnet {
 
     /// A value-transfer intent from this wallet's account to the allowlisted recipient.
     pub fn intent(&self, value: u64) -> TxIntent {
+        self.intent_wei(U256::from(value))
+    }
+
+    /// As [`intent`](Self::intent) but with an arbitrary wei value (e.g. an
+    /// over-balance amount to trip the estimate gate).
+    pub fn intent_wei(&self, value: U256) -> TxIntent {
         TxIntent {
             chain_id: self.chain_id(),
             account: self.account,
             to: TxKind::Call(RECIPIENT),
-            value: U256::from(value),
+            value,
             input: Default::default(),
             purpose: None,
         }
