@@ -2,7 +2,13 @@
 name = "walletkit"
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Client-side ergonomic facade over alloy for wallet infrastructure and transaction execution"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/21r21a33333/walletkit"
+readme = "README.md"
+keywords = ["ethereum", "evm", "wallet", "alloy", "transaction"]
+categories = ["cryptography::cryptocurrencies"]
 publish = false
 
 [dependencies]
