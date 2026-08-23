@@ -76,6 +76,79 @@ pub(crate) fn handle(nonce: u64, status: TxStatus) -> TxHandle {
     }
 }
 
+/// A handle for a specific `account` (the base [`handle`] uses the zero account) — the
+/// store conformance suite uses a non-zero account so it doesn't collide with other tests
+/// that share a process-global backend.
+pub(crate) fn handle_for(account: Address, nonce: u64, status: TxStatus) -> TxHandle {
+    let mut h = handle(nonce, status);
+    h.account = account;
+    h
+}
+
+/// The contract every [`StateStore`] backend must satisfy — run from each adapter's tests
+/// so all backends behave identically: nonce CAS (commit + version-conflict), the handle
+/// WAL (upsert/get), `pending_handles` excluding terminal, and upsert-by-id.
+pub(crate) async fn state_store_conformance(store: Arc<dyn StateStore>) {
+    let account = Address::from([0x11; 20]);
+    let scope = NonceScope::eoa(account);
+
+    // nonce CAS: the first commit succeeds; a stale expected_version is a conflict (not err).
+    assert_eq!(store.load_nonce_state(scope).await.unwrap().version, 0);
+    let s = NonceState {
+        next: 5,
+        ..Default::default()
+    };
+    assert!(
+        store
+            .cas_nonce_state(scope, 0, &s, FenceToken::SINGLE_WRITER)
+            .await
+            .unwrap(),
+        "first CAS commits"
+    );
+    assert!(
+        !store
+            .cas_nonce_state(scope, 0, &s, FenceToken::SINGLE_WRITER)
+            .await
+            .unwrap(),
+        "a stale version is a conflict, not an error"
+    );
+    let v1 = store.load_nonce_state(scope).await.unwrap();
+    assert_eq!(v1.version, 1);
+    assert_eq!(v1.value.next, 5);
+
+    // handle WAL: upsert / get / pending excludes terminal.
+    let sent = handle_for(account, 5, TxStatus::Sent);
+    let done = handle_for(account, 6, TxStatus::Confirmed { block: 9 });
+    store.put_handle(&sent).await.unwrap();
+    store.put_handle(&done).await.unwrap();
+    assert_eq!(store.handle(sent.id).await.unwrap().unwrap().nonce, 5);
+    assert_eq!(
+        store.handle(done.id).await.unwrap().unwrap().status,
+        TxStatus::Confirmed { block: 9 }
+    );
+    // an unknown id reads as None.
+    assert!(
+        store
+            .handle(handle_for(account, 99, TxStatus::Sent).id)
+            .await
+            .unwrap()
+            .is_none(),
+        "unknown id reads as None"
+    );
+    let pending = store.pending_handles(account).await.unwrap();
+    assert_eq!(pending.len(), 1, "terminal handle excluded from pending");
+    assert_eq!(pending[0].nonce, 5);
+
+    // upsert-by-id: the live handle reaching terminal empties pending.
+    let mut sent2 = sent.clone();
+    sent2.status = TxStatus::Confirmed { block: 12 };
+    store.put_handle(&sent2).await.unwrap();
+    assert!(
+        store.pending_handles(account).await.unwrap().is_empty(),
+        "all handles now terminal"
+    );
+}
+
 /// A real EIP-1559 signed-tx encoding (fees 100/1, gas 21_000) — a decodable body for
 /// the bump path, which recovers fees/gas from the persisted `signed` bytes.
 fn signed_tx(nonce: u64) -> Bytes {

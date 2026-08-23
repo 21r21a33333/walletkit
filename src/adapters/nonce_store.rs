@@ -202,8 +202,7 @@ impl NonceManager for LocalNonceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::wallet::TxStatus;
-    use crate::testutils::{MockRpc, handle};
+    use crate::testutils::MockRpc;
 
     fn manager(pending: u64) -> LocalNonceManager {
         LocalNonceManager::new(
@@ -344,39 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_handles_excludes_terminal() {
-        let store = InMemoryStateStore::default();
-        let acct = Address::ZERO;
-        store.put_handle(&handle(1, TxStatus::Sent)).await.unwrap();
-        store
-            .put_handle(&handle(2, TxStatus::Confirmed { block: 1 }))
-            .await
-            .unwrap();
-        store
-            .put_handle(&handle(3, TxStatus::Replaced))
-            .await
-            .unwrap();
-
-        let pending = store.pending_handles(acct).await.unwrap();
-        assert_eq!(pending.len(), 1); // only the Sent one; terminal excluded
-        assert_eq!(pending[0].nonce, 1);
-    }
-
-    #[tokio::test]
-    async fn handle_returns_by_id_including_terminal() {
-        let store = InMemoryStateStore::default();
-        let sent = handle(1, TxStatus::Sent);
-        let done = handle(2, TxStatus::Confirmed { block: 9 });
-        store.put_handle(&sent).await.unwrap();
-        store.put_handle(&done).await.unwrap();
-
-        assert_eq!(store.handle(sent.id).await.unwrap().unwrap().nonce, 1);
-        // terminal handles are gone from pending_handles but still readable by id:
-        assert_eq!(
-            store.handle(done.id).await.unwrap().unwrap().status,
-            TxStatus::Confirmed { block: 9 }
-        );
-        let missing = handle(99, TxStatus::Sent).id;
-        assert!(store.handle(missing).await.unwrap().is_none());
+    async fn in_memory_store_passes_conformance() {
+        crate::testutils::state_store_conformance(Arc::new(InMemoryStateStore::default())).await;
     }
 }
