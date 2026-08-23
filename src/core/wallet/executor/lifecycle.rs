@@ -406,4 +406,75 @@ mod tests {
             Some(TxStatus::Replacing { since_block: 10 })
         );
     }
+
+    #[test]
+    fn zero_required_depth_confirms_at_the_inclusion_block() {
+        // required == 0 (a zero-conf L2): terminal at the exact inclusion block. Pins the
+        // `+1` clamp — latest == block gives saturating_sub(8)+1 = 1 >= 0.
+        assert_eq!(
+            transition(
+                &TxStatus::Sent,
+                &mined(8, Outcome::Executed),
+                &view(8, 0),
+                &depth(0)
+            ),
+            Some(TxStatus::Confirmed { block: 8 })
+        );
+    }
+
+    #[test]
+    fn replacing_is_reclaimed_by_our_own_mined_tx() {
+        // A reorg re-included our tx after we'd marked the nonce Replacing. The Mined arm
+        // does not gate on state, so Replacing -> tentative Mined -> Confirmed at depth;
+        // fails the instant anyone restricts the Mined arm to Sent/Mined.
+        let cfg = depth(2);
+        assert_eq!(
+            transition(
+                &TxStatus::Replacing { since_block: 5 },
+                &mined(8, Outcome::Executed),
+                &view(8, 0),
+                &cfg
+            ),
+            Some(TxStatus::Mined {
+                block: 8,
+                block_hash: HASH
+            })
+        );
+        assert_eq!(
+            transition(
+                &TxStatus::Replacing { since_block: 5 },
+                &mined(8, Outcome::Executed),
+                &view(9, 0),
+                &cfg
+            ),
+            Some(TxStatus::Confirmed { block: 8 })
+        );
+    }
+
+    #[test]
+    fn remine_into_a_different_block_updates_the_anchor() {
+        // A reorg re-includes our tx at a *different* block: advance both block and hash
+        // (re-keying the depth clock), never a no-op. Complements the same-block no-op test.
+        let hash_a = B256::repeat_byte(0xa);
+        let hash_b = B256::repeat_byte(0xb);
+        assert_eq!(
+            transition(
+                &TxStatus::Mined {
+                    block: 8,
+                    block_hash: hash_a,
+                },
+                &ChainEvent::Mined {
+                    block: 12,
+                    block_hash: hash_b,
+                    outcome: Outcome::Executed,
+                },
+                &view(12, 0),
+                &depth(4)
+            ),
+            Some(TxStatus::Mined {
+                block: 12,
+                block_hash: hash_b,
+            })
+        );
+    }
 }
