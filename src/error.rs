@@ -131,11 +131,11 @@ fn submission_kind(e: &SubmissionError) -> ErrorKind {
     }
 }
 
-// `StateStoreError` is uninhabited in Phase 1 (the in-memory store never errors), so this
-// is never actually reached; a durable backend will make store I/O retryable, which this
-// already reflects.
-fn store_kind(_e: &StateStoreError) -> ErrorKind {
-    ErrorKind::Retryable
+fn store_kind(e: &StateStoreError) -> ErrorKind {
+    match e {
+        StateStoreError::Backend { .. } | StateStoreError::Task(_) => ErrorKind::Retryable,
+        StateStoreError::Serialization { .. } | StateStoreError::Fenced => ErrorKind::Terminal,
+    }
 }
 
 impl From<TransactionManagerError> for WalletKitError {

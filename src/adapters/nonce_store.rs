@@ -25,7 +25,7 @@
 use crate::core::deps::{
     NonceManager, NonceManagerError, Rpc, StateStore, StateStoreError, Versioned,
 };
-use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
+use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};
 use crate::obs::debug;
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ use std::sync::Arc;
 /// handles. Non-durable, so recovery is single-run (see the module docs).
 #[derive(Default)]
 pub struct InMemoryStateStore {
-    nonces: Mutex<HashMap<NonceScope, Versioned<NonceState>>>,
+    nonces: Mutex<HashMap<NonceScope, (Versioned<NonceState>, FenceToken)>>,
     handles: Mutex<HashMap<HandleId, TxHandle>>,
 }
 
@@ -47,7 +47,12 @@ impl StateStore for InMemoryStateStore {
         &self,
         scope: NonceScope,
     ) -> Result<Versioned<NonceState>, StateStoreError> {
-        Ok(self.nonces.lock().get(&scope).cloned().unwrap_or_default())
+        Ok(self
+            .nonces
+            .lock()
+            .get(&scope)
+            .map(|(v, _)| v.clone())
+            .unwrap_or_default())
     }
 
     async fn cas_nonce_state(
@@ -55,19 +60,27 @@ impl StateStore for InMemoryStateStore {
         scope: NonceScope,
         expected_version: u64,
         state: &NonceState,
+        fence: FenceToken,
     ) -> Result<bool, StateStoreError> {
         let mut nonces = self.nonces.lock();
-        let current = nonces.get(&scope).map_or(0, |v| v.version);
-        if current != expected_version {
+        let (cur_version, cur_fence) = nonces
+            .get(&scope)
+            .map_or((0, FenceToken::SINGLE_WRITER), |(v, f)| (v.version, *f));
+        if fence < cur_fence {
+            return Err(StateStoreError::Fenced);
+        }
+        if cur_version != expected_version {
             return Ok(false);
         }
-        nonces.insert(
-            scope,
+        // Past the guard, `fence >= cur_fence`, so it is already the new high-water mark.
+        let entry = (
             Versioned {
                 value: state.clone(),
                 version: expected_version + 1,
             },
+            fence,
         );
+        nonces.insert(scope, entry);
         Ok(true)
     }
 
@@ -94,11 +107,32 @@ impl StateStore for InMemoryStateStore {
 pub struct LocalNonceManager {
     store: Arc<dyn StateStore>,
     rpc: Arc<dyn Rpc>,
+    /// The fence carried on every CAS. Single-writer-per-account is the documented
+    /// default (SPEC §7); a distributed lease issuer will supply a real token later.
+    fence: FenceToken,
 }
 
 impl LocalNonceManager {
     pub fn new(store: Arc<dyn StateStore>, rpc: Arc<dyn Rpc>) -> Self {
-        Self { store, rpc }
+        Self {
+            store,
+            rpc,
+            fence: FenceToken::SINGLE_WRITER,
+        }
+    }
+
+    /// CAS the scope's state carrying this manager's fence, so the single-writer token is
+    /// threaded in one place rather than at every allocate/release/reset call site.
+    async fn cas(
+        &self,
+        scope: NonceScope,
+        version: u64,
+        value: &NonceState,
+    ) -> Result<bool, NonceManagerError> {
+        Ok(self
+            .store
+            .cas_nonce_state(scope, version, value, self.fence)
+            .await?)
     }
 }
 
@@ -122,7 +156,7 @@ impl NonceManager for LocalNonceManager {
                     n
                 }
             };
-            if self.store.cas_nonce_state(scope, version, &value).await? {
+            if self.cas(scope, version, &value).await? {
                 debug!(nonce, "nonce assigned");
                 return Ok(nonce);
             }
@@ -145,7 +179,7 @@ impl NonceManager for LocalNonceManager {
             } else {
                 value.free.insert(nonce); // a middle gap: recycle it later
             }
-            if self.store.cas_nonce_state(scope, version, &value).await? {
+            if self.cas(scope, version, &value).await? {
                 return Ok(());
             }
         }
@@ -157,7 +191,7 @@ impl NonceManager for LocalNonceManager {
             let Versioned { mut value, version } = self.store.load_nonce_state(scope).await?;
             value.next = value.next.max(chain_next); // forward only
             value.free.retain(|&n| n >= chain_next); // drop freed nonces consumed on-chain
-            if self.store.cas_nonce_state(scope, version, &value).await? {
+            if self.cas(scope, version, &value).await? {
                 debug!(chain_next, "nonce reconciled to chain");
                 return Ok(());
             }
@@ -168,153 +202,18 @@ impl NonceManager for LocalNonceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::wallet::TxStatus;
-    use crate::testutils::{MockRpc, handle};
 
-    fn manager(pending: u64) -> LocalNonceManager {
-        LocalNonceManager::new(
-            Arc::new(InMemoryStateStore::default()),
-            Arc::new(MockRpc {
-                pending_nonce: pending,
-                ..Default::default()
-            }),
-        )
-    }
-
+    // The manager's allocate/release/reset/concurrent behavior lives in the shared
+    // `nonce_manager_conformance` suite (run here + against redb + Postgres), and the store
+    // contract — including fence rejection — in `state_store_conformance`. Keeping both here
+    // means the in-memory store is held to the exact same bar as the durable backends.
     #[tokio::test]
-    async fn allocates_gaplessly_reconciling_from_chain_on_first_use() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        assert_eq!(m.allocate(a).await.unwrap(), 5);
-        assert_eq!(m.allocate(a).await.unwrap(), 6);
-        assert_eq!(m.allocate(a).await.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn release_top_shrinks_high_water_and_absorbs_contiguous_freed() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        for _ in 0..3 {
-            m.allocate(a).await.unwrap(); // 5,6,7 -> next=8
-        }
-        m.release(a, 6).await.unwrap(); // middle gap -> free={6}
-        m.release(a, 7).await.unwrap(); // top -> next 8->7, absorbs 6 -> next=6
-        assert_eq!(m.allocate(a).await.unwrap(), 6);
-    }
-
-    #[tokio::test]
-    async fn release_middle_recycles_lowest_first() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        for _ in 0..3 {
-            m.allocate(a).await.unwrap(); // next=8
-        }
-        m.release(a, 6).await.unwrap(); // free={6}
-        assert_eq!(m.allocate(a).await.unwrap(), 6); // recycle freed first
-        assert_eq!(m.allocate(a).await.unwrap(), 8); // then fresh
-    }
-
-    #[tokio::test]
-    async fn reset_moves_forward_only_on_nonce_too_low() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        for _ in 0..3 {
-            m.allocate(a).await.unwrap(); // next=8
-        }
-        m.reset(a, 10).await.unwrap(); // jump forward
-        assert_eq!(m.allocate(a).await.unwrap(), 10);
-        m.reset(a, 3).await.unwrap(); // stale reset does not move backward
-        assert_eq!(m.allocate(a).await.unwrap(), 11);
-    }
-
-    #[tokio::test]
-    async fn reset_retains_high_freed_nonce_and_drops_consumed_freed() {
-        // reset() drops freed nonces the chain already consumed but keeps those at or
-        // above the chain's next — the `>=` boundary, not `>`. The at-boundary element
-        // (75) is what distinguishes the two; the plain fixtures elsewhere can't.
-        use std::collections::BTreeSet;
-        let store = Arc::new(InMemoryStateStore::default());
-        let m = LocalNonceManager::new(
-            store.clone(),
-            Arc::new(MockRpc {
-                pending_nonce: 0,
-                ..Default::default()
-            }),
-        );
-        let a = Address::ZERO;
-        let scope = NonceScope::eoa(a);
-        let seeded = NonceState {
-            next: 100,
-            free: BTreeSet::from([74, 75, 150]),
-        };
-        assert!(store.cas_nonce_state(scope, 0, &seeded).await.unwrap());
-
-        m.reset(a, 75).await.unwrap();
-
-        let after = store.load_nonce_state(scope).await.unwrap().value;
-        assert_eq!(after.next, 100); // max(100, 75) — forward only
-        assert_eq!(after.free, BTreeSet::from([75, 150])); // 74 dropped, 75 kept (>=), 150 kept
-
-        // Recycle lowest-first across the reset boundary, then fresh from `next`.
-        assert_eq!(m.allocate(a).await.unwrap(), 75);
-        assert_eq!(m.allocate(a).await.unwrap(), 150);
-        assert_eq!(m.allocate(a).await.unwrap(), 100);
-        assert_eq!(m.allocate(a).await.unwrap(), 101);
+    async fn in_memory_store_passes_conformance() {
+        crate::testutils::state_store_conformance(Arc::new(InMemoryStateStore::default())).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_allocations_never_duplicate() {
-        let m = Arc::new(manager(5));
-        let a = Address::ZERO;
-        let handles: Vec<_> = (0..50)
-            .map(|_| {
-                let m = m.clone();
-                tokio::spawn(async move { m.allocate(a).await.unwrap() })
-            })
-            .collect();
-
-        let mut nonces = Vec::new();
-        for h in handles {
-            nonces.push(h.await.unwrap());
-        }
-        nonces.sort_unstable();
-        assert_eq!(nonces, (5..55).collect::<Vec<_>>()); // 50 unique & contiguous
-    }
-
-    #[tokio::test]
-    async fn pending_handles_excludes_terminal() {
-        let store = InMemoryStateStore::default();
-        let acct = Address::ZERO;
-        store.put_handle(&handle(1, TxStatus::Sent)).await.unwrap();
-        store
-            .put_handle(&handle(2, TxStatus::Confirmed { block: 1 }))
-            .await
-            .unwrap();
-        store
-            .put_handle(&handle(3, TxStatus::Replaced))
-            .await
-            .unwrap();
-
-        let pending = store.pending_handles(acct).await.unwrap();
-        assert_eq!(pending.len(), 1); // only the Sent one; terminal excluded
-        assert_eq!(pending[0].nonce, 1);
-    }
-
-    #[tokio::test]
-    async fn handle_returns_by_id_including_terminal() {
-        let store = InMemoryStateStore::default();
-        let sent = handle(1, TxStatus::Sent);
-        let done = handle(2, TxStatus::Confirmed { block: 9 });
-        store.put_handle(&sent).await.unwrap();
-        store.put_handle(&done).await.unwrap();
-
-        assert_eq!(store.handle(sent.id).await.unwrap().unwrap().nonce, 1);
-        // terminal handles are gone from pending_handles but still readable by id:
-        assert_eq!(
-            store.handle(done.id).await.unwrap().unwrap().status,
-            TxStatus::Confirmed { block: 9 }
-        );
-        let missing = handle(99, TxStatus::Sent).id;
-        assert!(store.handle(missing).await.unwrap().is_none());
+    async fn in_memory_manager_passes_conformance() {
+        crate::testutils::nonce_manager_conformance(Arc::new(InMemoryStateStore::default())).await;
     }
 }

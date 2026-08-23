@@ -38,8 +38,20 @@ These rules override default behavior and MUST be followed for every task.
 - Decompose large functions; reduce LOC where it stays clean.
 - **YAGNI** — define a type/field/variant/config knob only when a consumer
   actually needs it. Don't pre-build. Add deps at their first real consumer.
-- Reuse before hand-rolling: prefer alloy / serde / library primitives over
-  bespoke code.
+- **Reuse before hand-rolling — do not reinvent the wheel.** If a single library
+  function, a built-in/default, or a popular well-maintained crate does the job, use it
+  instead of writing the logic yourself; delete code the library already provides. Prefer
+  alloy / serde / sqlx / redb / std primitives over bespoke code. Before writing a
+  non-trivial routine, ask "does a primitive already do this?" — e.g. redb commits are
+  `Durability::Immediate` by *default* (don't set it explicitly), SQL upserts use
+  `INSERT … ON CONFLICT` (don't read-modify-write), hex via `alloy`'s `LowerHex` (don't
+  format by hand). Weigh a new dependency against its maintenance/stability (an
+  unstable-API crate can be worse than 100 clear lines). Keep LOC low and the code
+  straightforward.
+- **Enforce reuse at plan-writing time.** Every plan step that involves non-trivial logic
+  must name the library primitive it will use (or explicitly justify why none fits). Don't
+  defer the "is there a primitive for this?" question to implementation — decide it in the
+  plan.
 - **No `unwrap()`/`expect()` in production code** — they panic. Propagate with `?`
   through the per-port `{TraitName}Error`, or handle explicitly (`unwrap_or`,
   `unwrap_or_default`, `if let`, `let … else`, `match`). Allowed **only** in
@@ -91,6 +103,8 @@ New code MUST follow these; they are not optional.
 
 - [ ] Slice layout respected; ports one-per-file with `{TraitName}Error`.
 - [ ] YAGNI: no unused types/fields/deps introduced.
+- [ ] Reuse check: no logic hand-rolled that a library fn / default / popular crate
+      already provides; LOC kept low.
 - [ ] Comments are why-not-what; naming matches house style.
 - [ ] Only regression-worthy tests added.
 - [ ] Public failures return `WalletKitError` (classified via `kind()`); new
