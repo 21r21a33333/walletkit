@@ -27,6 +27,8 @@ alloy-transport-http = { version = "2.4.1", features = ["reqwest"] }
 async-trait = "0.1.92"
 # poison-free locks — no `.lock().unwrap()` in production code.
 parking_lot = "0.12"
+# Durable embedded StateStore backend (pure-Rust ACID KV); opt-in via the `redb` feature.
+redb = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.20"
@@ -45,11 +47,13 @@ wasmtime-wasi = { version = "36", optional = true }
 zeroize = "1.9.0"
 
 [features]
-default = ["tracing"]
+default = ["tracing", "redb"]
 tracing = ["dep:tracing"]
+redb = ["dep:redb"]
 policy-moonpay = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:time"]
 
 [dev-dependencies]
 alloy-node-bindings = "2.4.1"
 tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
+tempfile = "3"

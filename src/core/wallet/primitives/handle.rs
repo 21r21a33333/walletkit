@@ -14,6 +14,13 @@ impl HandleId {
         buf[32..].copy_from_slice(&nonce.to_be_bytes());
         Self(keccak256(buf))
     }
+
+    /// The raw 32-byte id — how durable stores key a handle. (Only durable backends key by
+    /// the raw bytes; the cfg widens as each is added.)
+    #[cfg(feature = "redb")]
+    pub(crate) fn as_bytes(self) -> [u8; 32] {
+        self.0.0
+    }
 }
 
 /// Lifecycle of a tracked transaction. Only `Confirmed`/`Failed`/`Replaced` are

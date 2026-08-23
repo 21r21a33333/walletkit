@@ -655,14 +655,16 @@ CAS (transaction; distinguishes fence-out from version-conflict):
             return Ok(false);
         }
         let json = serde_json::to_value(state).map_err(ser)?;
+        // Past the guard `fence_i >= cur_fence`, so `$3` is already the new high-water mark —
+        // no `GREATEST`/`.max()` needed (mirrors the redb + in-memory adapters).
         sqlx::query(
             "INSERT INTO nonce_state (account, version, fence, state) VALUES ($1, $2, $3, $4)
              ON CONFLICT (account) DO UPDATE SET version = nonce_state.version + 1,
-             fence = GREATEST(nonce_state.fence, $3), state = $4",
+             fence = $3, state = $4",
         )
         .bind(&account)
         .bind(expected_version as i64 + 1)
-        .bind(fence_i.max(cur_fence))
+        .bind(fence_i)
         .bind(json)
         .execute(&mut *tx)
         .await
@@ -671,7 +673,7 @@ CAS (transaction; distinguishes fence-out from version-conflict):
         Ok(true)
     }
 ```
-`load_nonce_state` selects version+state (`Versioned::default()` if absent). `put_handle` upserts `tx_handles` with `terminal = handle.status.is_terminal()`. `pending_handles` = `SELECT handle FROM tx_handles WHERE account = $1 AND NOT terminal`. `handle` selects by id (`id.as_bytes()` → `BYTEA`). Decode handles with `serde_json::from_value`. The token round-trip uses the `pub(crate)` `FenceToken::as_u64`/`from_u64` added in Task 1 Step 8; define a local `fn fence_to_i64(f: FenceToken) -> i64 { f.as_u64() as i64 }` in the adapter. (redb stores the token via serde and needs no such helper; Postgres stores it as an `i64`, so it does.)
+`load_nonce_state` selects version+state (`Versioned::default()` if absent). `put_handle` upserts `tx_handles` with `terminal = handle.status.is_terminal()`. `pending_handles` = `SELECT handle FROM tx_handles WHERE account = $1 AND NOT terminal`. `handle` selects by id (`id.as_bytes()` → `BYTEA`). Decode handles with `serde_json::from_value`. The token round-trip needs `pub(crate)` `FenceToken::as_u64`/`from_u64` — **add them here** (deferred from Task 1, where redb needed none), then define a local `fn fence_to_i64(f: FenceToken) -> i64 { f.as_u64() as i64 }` in the adapter. (redb stores the token via serde and needs no such helper; Postgres stores it as an `i64`, so it does.)
 
 - [ ] **Step 3: Re-export** in `adapters/mod.rs`:
 

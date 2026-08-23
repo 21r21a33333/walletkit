@@ -3870,6 +3870,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5244,8 +5253,10 @@ dependencies = [
  "alloy-transport-http",
  "async-trait",
  "parking_lot",
+ "redb",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "time",
  "tokio",
