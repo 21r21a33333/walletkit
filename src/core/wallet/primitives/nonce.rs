@@ -37,10 +37,20 @@ impl FenceToken {
     pub const SINGLE_WRITER: FenceToken = FenceToken(0);
 }
 
+#[cfg(feature = "postgres")]
+impl FenceToken {
+    /// The raw token value. Postgres stores the fence as a `BIGINT` column, so the adapter
+    /// needs the scalar; redb serializes the token directly and needs no accessor. (The
+    /// inverse `from_u64` is added when a consumer reconstructs a token from storage — the
+    /// CAS compares in `i64` space and never does, so it isn't needed yet.)
+    pub(crate) fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 impl FenceToken {
     /// Test-only: a token above `SINGLE_WRITER` to exercise the reject-if-lower path.
-    /// (The production `as_u64`/`from_u64` round-trip arrives with the Postgres adapter.)
     pub(crate) fn for_test(n: u64) -> Self {
         FenceToken(n)
     }

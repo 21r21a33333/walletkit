@@ -147,6 +147,147 @@ pub(crate) async fn state_store_conformance(store: Arc<dyn StateStore>) {
         store.pending_handles(account).await.unwrap().is_empty(),
         "all handles now terminal"
     );
+
+    // fence: a token below the high-water is rejected (a superseded owner must stop, not
+    // retry); a higher one commits and raises the high-water. On a fresh account so it
+    // doesn't disturb the CAS section above.
+    let facct = Address::from([0x33; 20]);
+    let fscope = NonceScope::eoa(facct);
+    let base = NonceState::default();
+    assert!(
+        store
+            .cas_nonce_state(fscope, 0, &base, FenceToken::SINGLE_WRITER)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .cas_nonce_state(fscope, 1, &base, FenceToken::for_test(1))
+            .await
+            .unwrap(),
+        "a higher fence commits and raises the high-water"
+    );
+    assert!(
+        matches!(
+            store
+                .cas_nonce_state(fscope, 2, &base, FenceToken::SINGLE_WRITER)
+                .await,
+            Err(StateStoreError::Fenced)
+        ),
+        "a fence below the high-water is rejected even at the right version"
+    );
+}
+
+/// The behavioral contract every backend must satisfy under the real [`LocalNonceManager`]
+/// — run from each store's tests so allocate/release/reset and concurrent CAS behave
+/// identically on in-memory, redb, and Postgres. Each scenario uses a distinct account, so
+/// the suite is safe to run against a shared backend and alongside
+/// [`state_store_conformance`]. Call it from a `multi_thread` test so the concurrency
+/// section exercises real parallelism.
+pub(crate) async fn nonce_manager_conformance(store: Arc<dyn StateStore>) {
+    use crate::adapters::LocalNonceManager;
+
+    // A manager over the shared store whose chain view reports `pending` as the next nonce.
+    let mgr = |pending: u64| {
+        LocalNonceManager::new(
+            store.clone(),
+            Arc::new(MockRpc {
+                pending_nonce: pending,
+                ..Default::default()
+            }),
+        )
+    };
+
+    // allocate: gapless, reconciling from the chain on first use.
+    {
+        let a = Address::from([0x40; 20]);
+        let m = mgr(5);
+        assert_eq!(m.allocate(a).await.unwrap(), 5);
+        assert_eq!(m.allocate(a).await.unwrap(), 6);
+        assert_eq!(m.allocate(a).await.unwrap(), 7);
+    }
+
+    // release the top: shrink the high-water and absorb now-contiguous freed nonces.
+    {
+        let a = Address::from([0x41; 20]);
+        let m = mgr(5);
+        for _ in 0..3 {
+            m.allocate(a).await.unwrap(); // 5,6,7 -> next=8
+        }
+        m.release(a, 6).await.unwrap(); // middle gap -> free={6}
+        m.release(a, 7).await.unwrap(); // top -> next 8->7, absorbs 6 -> next=6
+        assert_eq!(m.allocate(a).await.unwrap(), 6);
+    }
+
+    // release a middle gap: recycle the lowest freed nonce first, then fresh.
+    {
+        let a = Address::from([0x42; 20]);
+        let m = mgr(5);
+        for _ in 0..3 {
+            m.allocate(a).await.unwrap();
+        }
+        m.release(a, 6).await.unwrap();
+        assert_eq!(m.allocate(a).await.unwrap(), 6); // recycle freed first
+        assert_eq!(m.allocate(a).await.unwrap(), 8); // then fresh
+    }
+
+    // reset moves forward only — a stale reset never rewinds the high-water.
+    {
+        let a = Address::from([0x43; 20]);
+        let m = mgr(5);
+        for _ in 0..3 {
+            m.allocate(a).await.unwrap();
+        }
+        m.reset(a, 10).await.unwrap();
+        assert_eq!(m.allocate(a).await.unwrap(), 10);
+        m.reset(a, 3).await.unwrap();
+        assert_eq!(m.allocate(a).await.unwrap(), 11);
+    }
+
+    // reset drops freed nonces the chain already consumed but keeps those at or above
+    // `chain_next` — the `>=` boundary (75 kept, 74 dropped).
+    {
+        use std::collections::BTreeSet;
+        let a = Address::from([0x44; 20]);
+        let scope = NonceScope::eoa(a);
+        let seeded = NonceState {
+            next: 100,
+            free: BTreeSet::from([74, 75, 150]),
+        };
+        assert!(
+            store
+                .cas_nonce_state(scope, 0, &seeded, FenceToken::SINGLE_WRITER)
+                .await
+                .unwrap()
+        );
+        let m = mgr(0);
+        m.reset(a, 75).await.unwrap();
+        let after = store.load_nonce_state(scope).await.unwrap().value;
+        assert_eq!(after.next, 100); // max(100, 75) — forward only
+        assert_eq!(after.free, BTreeSet::from([75, 150])); // 74 dropped, 75 kept (>=)
+        assert_eq!(m.allocate(a).await.unwrap(), 75);
+        assert_eq!(m.allocate(a).await.unwrap(), 150);
+        assert_eq!(m.allocate(a).await.unwrap(), 100);
+        assert_eq!(m.allocate(a).await.unwrap(), 101);
+    }
+
+    // concurrent allocations never duplicate a nonce — the CAS-retry loop under contention.
+    {
+        let a = Address::from([0x45; 20]);
+        let m = Arc::new(mgr(5));
+        let tasks: Vec<_> = (0..50)
+            .map(|_| {
+                let m = m.clone();
+                tokio::spawn(async move { m.allocate(a).await.unwrap() })
+            })
+            .collect();
+        let mut nonces = Vec::new();
+        for t in tasks {
+            nonces.push(t.await.unwrap());
+        }
+        nonces.sort_unstable();
+        assert_eq!(nonces, (5..55).collect::<Vec<_>>()); // 50 unique & contiguous
+    }
 }
 
 /// A real EIP-1559 signed-tx encoding (fees 100/1, gas 21_000) — a decodable body for

@@ -223,6 +223,13 @@ mod tests {
         crate::testutils::state_store_conformance(Arc::new(store)).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn redb_manager_passes_conformance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbStateStore::open(dir.path().join("wk.redb")).unwrap();
+        crate::testutils::nonce_manager_conformance(Arc::new(store)).await;
+    }
+
     #[tokio::test]
     async fn redb_persists_across_reopen() {
         let dir = tempfile::tempdir().unwrap();

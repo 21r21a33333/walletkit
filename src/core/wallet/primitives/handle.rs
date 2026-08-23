@@ -17,7 +17,7 @@ impl HandleId {
 
     /// The raw 32-byte id — how durable stores key a handle. (Only durable backends key by
     /// the raw bytes; the cfg widens as each is added.)
-    #[cfg(feature = "redb")]
+    #[cfg(any(feature = "redb", feature = "postgres"))]
     pub(crate) fn as_bytes(self) -> [u8; 32] {
         self.0.0
     }

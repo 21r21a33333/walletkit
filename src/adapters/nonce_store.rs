@@ -202,148 +202,18 @@ impl NonceManager for LocalNonceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutils::MockRpc;
 
-    fn manager(pending: u64) -> LocalNonceManager {
-        LocalNonceManager::new(
-            Arc::new(InMemoryStateStore::default()),
-            Arc::new(MockRpc {
-                pending_nonce: pending,
-                ..Default::default()
-            }),
-        )
-    }
-
-    #[tokio::test]
-    async fn allocates_gaplessly_reconciling_from_chain_on_first_use() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        assert_eq!(m.allocate(a).await.unwrap(), 5);
-        assert_eq!(m.allocate(a).await.unwrap(), 6);
-        assert_eq!(m.allocate(a).await.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn release_top_shrinks_high_water_and_absorbs_contiguous_freed() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        for _ in 0..3 {
-            m.allocate(a).await.unwrap(); // 5,6,7 -> next=8
-        }
-        m.release(a, 6).await.unwrap(); // middle gap -> free={6}
-        m.release(a, 7).await.unwrap(); // top -> next 8->7, absorbs 6 -> next=6
-        assert_eq!(m.allocate(a).await.unwrap(), 6);
-    }
-
-    #[tokio::test]
-    async fn release_middle_recycles_lowest_first() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        for _ in 0..3 {
-            m.allocate(a).await.unwrap(); // next=8
-        }
-        m.release(a, 6).await.unwrap(); // free={6}
-        assert_eq!(m.allocate(a).await.unwrap(), 6); // recycle freed first
-        assert_eq!(m.allocate(a).await.unwrap(), 8); // then fresh
-    }
-
-    #[tokio::test]
-    async fn reset_moves_forward_only_on_nonce_too_low() {
-        let m = manager(5);
-        let a = Address::ZERO;
-        for _ in 0..3 {
-            m.allocate(a).await.unwrap(); // next=8
-        }
-        m.reset(a, 10).await.unwrap(); // jump forward
-        assert_eq!(m.allocate(a).await.unwrap(), 10);
-        m.reset(a, 3).await.unwrap(); // stale reset does not move backward
-        assert_eq!(m.allocate(a).await.unwrap(), 11);
-    }
-
-    #[tokio::test]
-    async fn reset_retains_high_freed_nonce_and_drops_consumed_freed() {
-        // reset() drops freed nonces the chain already consumed but keeps those at or
-        // above the chain's next — the `>=` boundary, not `>`. The at-boundary element
-        // (75) is what distinguishes the two; the plain fixtures elsewhere can't.
-        use std::collections::BTreeSet;
-        let store = Arc::new(InMemoryStateStore::default());
-        let m = LocalNonceManager::new(
-            store.clone(),
-            Arc::new(MockRpc {
-                pending_nonce: 0,
-                ..Default::default()
-            }),
-        );
-        let a = Address::ZERO;
-        let scope = NonceScope::eoa(a);
-        let seeded = NonceState {
-            next: 100,
-            free: BTreeSet::from([74, 75, 150]),
-        };
-        assert!(
-            store
-                .cas_nonce_state(scope, 0, &seeded, FenceToken::SINGLE_WRITER)
-                .await
-                .unwrap()
-        );
-
-        m.reset(a, 75).await.unwrap();
-
-        let after = store.load_nonce_state(scope).await.unwrap().value;
-        assert_eq!(after.next, 100); // max(100, 75) — forward only
-        assert_eq!(after.free, BTreeSet::from([75, 150])); // 74 dropped, 75 kept (>=), 150 kept
-
-        // Recycle lowest-first across the reset boundary, then fresh from `next`.
-        assert_eq!(m.allocate(a).await.unwrap(), 75);
-        assert_eq!(m.allocate(a).await.unwrap(), 150);
-        assert_eq!(m.allocate(a).await.unwrap(), 100);
-        assert_eq!(m.allocate(a).await.unwrap(), 101);
-    }
-
-    #[tokio::test]
-    async fn cas_rejects_a_lower_fence_and_raises_the_high_water() {
-        // The fence is a monotonic reject-if-lower guard (single-writer sentinel is a
-        // no-op; a higher token raises the high-water mark and fences out the sentinel).
-        let store = InMemoryStateStore::default();
-        let scope = NonceScope::eoa(Address::ZERO);
-        let s = NonceState::default();
-        assert!(
-            store
-                .cas_nonce_state(scope, 0, &s, FenceToken::SINGLE_WRITER)
-                .await
-                .unwrap()
-        );
-        let higher = FenceToken::for_test(1);
-        assert!(store.cas_nonce_state(scope, 1, &s, higher).await.unwrap());
-        assert!(matches!(
-            store
-                .cas_nonce_state(scope, 2, &s, FenceToken::SINGLE_WRITER)
-                .await,
-            Err(StateStoreError::Fenced)
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_allocations_never_duplicate() {
-        let m = Arc::new(manager(5));
-        let a = Address::ZERO;
-        let handles: Vec<_> = (0..50)
-            .map(|_| {
-                let m = m.clone();
-                tokio::spawn(async move { m.allocate(a).await.unwrap() })
-            })
-            .collect();
-
-        let mut nonces = Vec::new();
-        for h in handles {
-            nonces.push(h.await.unwrap());
-        }
-        nonces.sort_unstable();
-        assert_eq!(nonces, (5..55).collect::<Vec<_>>()); // 50 unique & contiguous
-    }
-
+    // The manager's allocate/release/reset/concurrent behavior lives in the shared
+    // `nonce_manager_conformance` suite (run here + against redb + Postgres), and the store
+    // contract — including fence rejection — in `state_store_conformance`. Keeping both here
+    // means the in-memory store is held to the exact same bar as the durable backends.
     #[tokio::test]
     async fn in_memory_store_passes_conformance() {
         crate::testutils::state_store_conformance(Arc::new(InMemoryStateStore::default())).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn in_memory_manager_passes_conformance() {
+        crate::testutils::nonce_manager_conformance(Arc::new(InMemoryStateStore::default())).await;
     }
 }
