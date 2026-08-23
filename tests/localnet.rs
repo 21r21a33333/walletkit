@@ -197,3 +197,59 @@ async fn stuck_tx_is_bumped_then_confirms() {
         Some(TxStatus::Confirmed { .. })
     ));
 }
+
+#[tokio::test]
+async fn reorg_unmines_without_false_confirm_then_recovers() {
+    // Depth 3 keeps the mined tx tentative (not terminal) so the reorg can act on it.
+    let net = match Localnet::spawn_with_confirmations(3).await {
+        Some(net) => net,
+        None => {
+            eprintln!("skipping: anvil not found on PATH");
+            return;
+        }
+    };
+
+    // Mine our tx; it's tentatively Mined (depth 3 not yet met).
+    let handle = net.wallet.send(&net.intent(1)).await.expect("send");
+    net.wallet.tick().await.expect("tick-mine");
+    assert!(
+        matches!(
+            net.wallet.status(handle.id).await.expect("status"),
+            Some(TxStatus::Mined { .. })
+        ),
+        "expected tentative Mined, got {:?}",
+        net.wallet.status(handle.id).await.expect("status")
+    );
+
+    // Reorg past it (auto-mine off so the dropped tx stays observably un-mined).
+    net.no_auto_mine().await;
+    net.reorg(1).await;
+    net.wallet.tick().await.expect("tick-reorg");
+    let after = net.wallet.status(handle.id).await.expect("status");
+    assert!(
+        !matches!(
+            after,
+            Some(TxStatus::Confirmed { .. })
+                | Some(TxStatus::Failed { .. })
+                | Some(TxStatus::Replaced)
+        ),
+        "a reorg must never produce a false terminal, got {after:?}"
+    );
+
+    // Recovery: rebroadcast + re-mine + confirm (robust to un-mine landing as Sent or
+    // being held as tentative Mined on a stale read).
+    let mut recovered = false;
+    for _ in 0..5 {
+        net.wallet.tick().await.expect("tick-recover");
+        net.mine(2).await;
+        net.wallet.tick().await.expect("tick-confirm");
+        if matches!(
+            net.wallet.status(handle.id).await.expect("status"),
+            Some(TxStatus::Confirmed { .. })
+        ) {
+            recovered = true;
+            break;
+        }
+    }
+    assert!(recovered, "tx should recover to Confirmed after the reorg");
+}

@@ -102,6 +102,17 @@ impl Localnet {
             .expect("anvil_mine");
     }
 
+    /// Reorg `depth` blocks: drop the most recent `depth` and rebuild them without the
+    /// dropped txs (which return to the pool). `anvil_reorg` with no injected txs.
+    pub async fn reorg(&self, depth: u64) {
+        let no_injected_txs: Vec<u64> = Vec::new();
+        let _: () = self
+            .control
+            .raw_request("anvil_reorg".into(), (depth, no_injected_txs))
+            .await
+            .expect("anvil_reorg");
+    }
+
     /// Stop mining on every tx so submitted txs stay pending in the pool.
     pub async fn no_auto_mine(&self) {
         let _: () = self
