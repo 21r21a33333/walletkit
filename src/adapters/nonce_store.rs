@@ -26,6 +26,7 @@ use crate::core::deps::{
     NonceManager, NonceManagerError, Rpc, StateStore, StateStoreError, Versioned,
 };
 use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
+use crate::obs::debug;
 use alloy_primitives::Address;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -122,6 +123,7 @@ impl NonceManager for LocalNonceManager {
                 }
             };
             if self.store.cas_nonce_state(scope, version, &value).await? {
+                debug!(nonce, "nonce assigned");
                 return Ok(nonce);
             }
             // a concurrent writer/replica advanced the version -> retry
@@ -156,6 +158,7 @@ impl NonceManager for LocalNonceManager {
             value.next = value.next.max(chain_next); // forward only
             value.free.retain(|&n| n >= chain_next); // drop freed nonces consumed on-chain
             if self.store.cas_nonce_state(scope, version, &value).await? {
+                debug!(chain_next, "nonce reconciled to chain");
                 return Ok(());
             }
         }
