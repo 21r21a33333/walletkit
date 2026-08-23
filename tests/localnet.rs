@@ -79,3 +79,40 @@ async fn overspend_rejects_and_recycles_the_nonce() {
         Some(TxStatus::Confirmed { .. })
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_batch_gapless_nonces_and_all_confirm() {
+    let net = localnet!();
+    let n = 8u64;
+
+    // Fire N sends at once — the CAS nonce allocator must hand out 0..n distinct,
+    // gapless nonces under real concurrent submission.
+    let mut tasks = Vec::new();
+    for i in 0..n {
+        let wallet = net.wallet.clone();
+        let intent = net.intent(i);
+        tasks.push(tokio::spawn(async move { wallet.send(&intent).await }));
+    }
+    let mut handles = Vec::new();
+    for task in tasks {
+        handles.push(task.await.expect("join").expect("send"));
+    }
+
+    let mut nonces: Vec<u64> = handles.iter().map(|h| h.nonce).collect();
+    nonces.sort_unstable();
+    assert_eq!(nonces, (0..n).collect::<Vec<_>>(), "gapless, unique nonces");
+
+    // All must mine and confirm.
+    net.mine(3).await;
+    net.wallet.tick().await.expect("tick");
+    for handle in &handles {
+        assert!(
+            matches!(
+                net.wallet.status(handle.id).await.expect("status"),
+                Some(TxStatus::Confirmed { .. })
+            ),
+            "nonce {} not confirmed",
+            handle.nonce
+        );
+    }
+}
