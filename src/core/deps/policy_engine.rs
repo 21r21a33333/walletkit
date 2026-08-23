@@ -1,15 +1,15 @@
-use crate::core::wallet::{Decision, TxIntent};
+use crate::core::wallet::{Decision, SigningRequest};
 use async_trait::async_trait;
 
-/// The pre-sign gate. Every engine (native / Regorus / WASM / remote) implements
-/// this and returns a [`Decision`] — `Allow` with the host-minted approval, or
-/// `Deny`. An operational failure (eval error, plugin trap, network) is `Err`,
-/// which the caller treats **fail-closed** (never sign, maybe retry); a
-/// `Decision::Deny` is a terminal denial. The host mints the approval, so no
-/// engine — including third-party plugins — can forge authorization.
+/// The pre-sign gate for every [`SigningRequest`] — a tx, an EIP-191 message, or EIP-712
+/// typed data. Every engine (native / Regorus / WASM / remote) implements this and returns
+/// a [`Decision`] — `Allow` with the host-minted approval, or `Deny`. An operational failure
+/// (eval error, plugin trap, network) is `Err`, which the caller treats **fail-closed**
+/// (never sign, maybe retry); a `Decision::Deny` is a terminal denial. The host mints the
+/// approval, so no engine — including third-party plugins — can forge authorization.
 #[async_trait]
 pub trait PolicyEngine: Send + Sync {
-    async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError>;
+    async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError>;
 }
 
 /// The native engine never errors (returns `Ok(Decision::Deny)`); these variants

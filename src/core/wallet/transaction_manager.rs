@@ -10,7 +10,8 @@ use crate::core::deps::{
     SubmissionError, SubmissionStrategy,
 };
 use crate::core::wallet::{
-    Decision, HandleId, PolicyApproval, PolicyRejection, TxHandle, TxIntent, TxStatus,
+    Decision, HandleId, PolicyApproval, PolicyRejection, SigningRequest, TxHandle, TxIntent,
+    TxStatus,
 };
 use crate::obs::{debug, error, info, warn};
 use alloy_eips::eip1559::Eip1559Estimation;
@@ -112,7 +113,8 @@ impl TransactionManager {
         };
         let fees = self.gas_oracle.estimate().await?;
 
-        let approval = match self.policy.evaluate(intent).await? {
+        let request = SigningRequest::Transaction(intent.clone());
+        let approval = match self.policy.evaluate(&request).await? {
             Decision::Allow(approval) => approval,
             Decision::Deny(rejection) => return Err(TransactionManagerError::Denied(rejection)),
         };

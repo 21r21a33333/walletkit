@@ -16,7 +16,7 @@ use crate::core::deps::{
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
     SubmissionError, SubmissionStrategy,
 };
-use crate::core::wallet::{Decision, HandleId, PolicyApproval, TxHandle, TxStatus};
+use crate::core::wallet::{Decision, HandleId, PolicyApproval, SigningRequest, TxHandle, TxStatus};
 use crate::obs::{debug, info, warn};
 use alloy_consensus::TxEnvelope;
 use alloy_eips::Decodable2718;
@@ -350,7 +350,8 @@ impl AccountExecutor {
         {
             return Ok(Some(approval));
         }
-        match self.policy.evaluate(&handle.intent).await? {
+        let request = SigningRequest::Transaction(handle.intent.clone());
+        match self.policy.evaluate(&request).await? {
             Decision::Allow(approval) => Ok(admits(&approval).then_some(approval)),
             Decision::Deny(_) => Ok(None),
         }

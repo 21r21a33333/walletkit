@@ -12,7 +12,8 @@ use crate::core::deps::{
 };
 use crate::core::wallet::{
     AccountExecutor, Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope,
-    NonceState, PolicyApproval, PolicyRejection, TransactionManager, TxHandle, TxIntent, TxStatus,
+    NonceState, PolicyApproval, PolicyRejection, SigningRequest, TransactionManager, TxHandle,
+    TxIntent, TxStatus,
 };
 use alloy_consensus::{
     Receipt, ReceiptEnvelope, ReceiptWithBloom, SignableTransaction, TxEip1559, TxLegacy,
@@ -507,12 +508,13 @@ impl Default for MockPolicy {
 
 #[async_trait]
 impl PolicyEngine for MockPolicy {
-    async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError> {
+    async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError> {
         note(&self.log, "policy");
         *self.calls.lock() += 1;
         Ok(if self.allow {
+            let payload_hash = request.signing_hash().unwrap_or_default();
             Decision::Allow(PolicyApproval::mint(
-                intent.hash(),
+                payload_hash,
                 self.envelope,
                 self.valid_until,
             ))
