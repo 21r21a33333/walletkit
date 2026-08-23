@@ -12,12 +12,11 @@ pub use lifecycle::{ChainEvent, ChainView, Finality, FinalityConfig, Outcome, tr
 
 use super::signing;
 use crate::core::deps::{
-    Clock, GasOracle, GasOracleError, NonceManager, PolicyEngine, Rpc, Signer, StateStore,
-    SubmissionStrategy,
+    Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
+    PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
+    SubmissionError, SubmissionStrategy,
 };
-use crate::core::wallet::{
-    Decision, HandleId, PolicyApproval, TransactionManagerError, TxHandle, TxStatus,
-};
+use crate::core::wallet::{Decision, HandleId, PolicyApproval, TxHandle, TxStatus};
 use alloy_consensus::TxEnvelope;
 use alloy_eips::Decodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
@@ -127,7 +126,7 @@ impl AccountExecutor {
 
     /// One executor cycle: recover in-flight txs, confirm progress, bump the stuck.
     /// The host calls this per `Clock` tick.
-    pub async fn tick(&self) -> Result<(), TransactionManagerError> {
+    pub async fn tick(&self) -> Result<(), ExecutorError> {
         self.recover().await?;
         self.confirm().await?;
         self.send().await
@@ -137,7 +136,7 @@ impl AccountExecutor {
     /// Idempotent — an already-known tx is fine — so a per-handle submit failure is
     /// skipped; only a store read failure aborts the cycle. Mined/Replacing handles
     /// are Confirm's job (rebroadcasting them only earns a nonce-too-low).
-    pub async fn recover(&self) -> Result<(), TransactionManagerError> {
+    pub async fn recover(&self) -> Result<(), ExecutorError> {
         for handle in self.state_store.pending_handles(self.account).await? {
             if matches!(handle.status, TxStatus::Pending | TxStatus::Sent) {
                 let _ = self.submission.submit(handle.signed.clone()).await;
@@ -150,7 +149,7 @@ impl AccountExecutor {
     /// forward, then move each handle by the pure [`transition`]. Every unreliable read
     /// collapses to [`ChainEvent::Unknown`] (per handle) or a skipped cycle (bad view),
     /// so a wrong read can neither advance nor rewind the lifecycle.
-    pub async fn confirm(&self) -> Result<(), TransactionManagerError> {
+    pub async fn confirm(&self) -> Result<(), ExecutorError> {
         let Some(cycle) = self.read_cycle().await? else {
             return Ok(()); // stale/inconsistent head — skip the whole cycle
         };
@@ -178,7 +177,7 @@ impl AccountExecutor {
     /// `finalized` tag, fall back to a depth count when the chain lacks it. Returns
     /// `None` — skip the cycle — when the head regressed since last cycle or `finalized`
     /// is above `latest`, both signs of a stale/lagging node.
-    async fn read_cycle(&self) -> Result<Option<Cycle>, TransactionManagerError> {
+    async fn read_cycle(&self) -> Result<Option<Cycle>, ExecutorError> {
         let latest = self.rpc.block_number().await?;
         let mined_nonce = self.rpc.tx_count(self.account).await?;
         if latest < self.last_latest.load(Ordering::Relaxed) {
@@ -246,14 +245,10 @@ impl AccountExecutor {
     /// the **same nonce** (RBF). Everything a bump needs comes from the persisted
     /// handle (only the approval is a cache). Best-effort per handle — one failure
     /// doesn't abort the cycle.
-    pub async fn send(&self) -> Result<(), TransactionManagerError> {
-        let mined = self.rpc.tx_count(self.account).await?;
+    pub async fn send(&self) -> Result<(), ExecutorError> {
         let now = self.clock.now_unix();
         for mut handle in self.state_store.pending_handles(self.account).await? {
-            // Only txs still in the mempool (Sent, nonce not yet mined) that have
-            // outstayed the timeout are bumped; the mined region is Confirm's job.
             let stuck = matches!(handle.status, TxStatus::Sent)
-                && handle.nonce >= mined
                 && now.saturating_sub(handle.last_broadcast_at) >= self.bump_timeout;
             if stuck {
                 let _ = self.bump(&mut handle, now).await;
@@ -262,7 +257,12 @@ impl AccountExecutor {
         Ok(())
     }
 
-    async fn bump(&self, handle: &mut TxHandle, now: u64) -> Result<(), TransactionManagerError> {
+    async fn bump(&self, handle: &mut TxHandle, now: u64) -> Result<(), ExecutorError> {
+        // Re-check right before bumping: if the nonce mined since the handle was
+        // selected, don't broadcast a doomed replacement — Confirm will settle it.
+        if handle.nonce < self.rpc.tx_count(self.account).await? {
+            return Ok(());
+        }
         // The current fees + gas limit live in the persisted signed tx.
         let Some((fees, gas_limit)) = decode_fees(&handle.signed) else {
             return Ok(()); // undecodable (never our own tx) -> leave it
@@ -289,7 +289,12 @@ impl AccountExecutor {
         let tx = signing::build_tx(&handle.intent, handle.nonce, gas_limit, bumped);
         let (rlp, tx_hash) =
             signing::sign_encode(&*self.signer, tx, handle.intent_hash, &approval, now).await?;
-        self.submission.submit(rlp.clone()).await?;
+        match self.submission.submit(rlp.clone()).await {
+            Ok(_) => {}
+            // Already in the mempool (a prior round's replacement): record it, not an error.
+            Err(e) if e.is_already_accepted() => {}
+            Err(e) => return Err(e.into()),
+        }
 
         handle.signed = rlp;
         handle.broadcasts.push(tx_hash);
@@ -308,7 +313,7 @@ impl AccountExecutor {
         handle: &TxHandle,
         bumped: Eip1559Estimation,
         now: u64,
-    ) -> Result<Option<PolicyApproval>, TransactionManagerError> {
+    ) -> Result<Option<PolicyApproval>, ExecutorError> {
         let admits = |a: &PolicyApproval| {
             a.gas_envelope()
                 .admits(bumped.max_fee_per_gas, bumped.max_priority_fee_per_gas)
@@ -343,13 +348,34 @@ fn decode_fees(signed: &Bytes) -> Option<(Eip1559Estimation, u64)> {
     }
 }
 
+/// Operational failures the executor surfaces from the ports it drives. Its own type
+/// (not the pipeline's) — tracking and one-shot send are separate concerns.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExecutorError {
+    #[error(transparent)]
+    Rpc(#[from] RpcError),
+    #[error(transparent)]
+    Gas(#[from] GasOracleError),
+    #[error(transparent)]
+    Policy(#[from] PolicyEngineError),
+    #[error(transparent)]
+    Nonce(#[from] NonceManagerError),
+    #[error(transparent)]
+    Signer(#[from] SignerError),
+    #[error(transparent)]
+    Store(#[from] StateStoreError),
+    #[error(transparent)]
+    Submission(#[from] SubmissionError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::wallet::GasEnvelope;
     use crate::testutils::{
-        Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, estimation,
-        handle, receipt,
+        Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, Submit,
+        estimation, handle, receipt,
     };
     use alloy_primitives::B256;
 
@@ -628,5 +654,65 @@ mod tests {
         exec.send().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 1); // no new broadcast
         assert_eq!(*policy.calls.lock(), 0);
+    }
+
+    #[tokio::test]
+    async fn bump_records_broadcast_when_already_known() {
+        // "already known" == the replacement is already in the mempool -> record it as a
+        // broadcast (so Confirm can match its receipt), not an error that drops it.
+        let store = Arc::new(MockStore::default());
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .submit(Arc::new(MockSubmit {
+                outcome: Submit::AlreadyKnown,
+                ..Default::default()
+            }))
+            .clock(Arc::new(MockClock(1000)))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        let h = handle(4, TxStatus::Sent);
+        store.put_handle(&h).await.unwrap();
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
+        );
+        exec.send().await.unwrap();
+        assert_eq!(store.all()[0].broadcasts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bump_aborts_if_nonce_already_mined() {
+        // tx_count advanced past our nonce between selection and bump -> no doomed
+        // replacement broadcast; Confirm will settle it.
+        let store = Arc::new(MockStore::default());
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 5, // our nonce 4 is already mined
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .clock(Arc::new(MockClock(1000)))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        let h = handle(4, TxStatus::Sent);
+        store.put_handle(&h).await.unwrap();
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
+        );
+        exec.send().await.unwrap();
+        assert_eq!(store.all()[0].broadcasts.len(), 1); // aborted, no bump
     }
 }

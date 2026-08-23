@@ -158,10 +158,11 @@ impl TransactionManager {
 
         match self.submission.submit(rlp).await {
             Ok(_) => {}
-            // Transient/indeterminate: the tx may already be in the mempool. Assume sent
-            // — keep the nonce reserved (releasing could reuse a live nonce -> double
-            // spend) and let recover() rebroadcast if needed (idempotent).
-            Err(e) if is_transient_submit(&e) => {
+            // Transient (may be in flight) or already-accepted ("already known"/"nonce
+            // too low" -> already sent/mined): assume sent — keep the nonce reserved
+            // (releasing could reuse a live nonce -> double spend) and let recover()/
+            // confirm() settle it.
+            Err(e) if e.is_transient() || e.is_already_accepted() => {
                 handle.status = TxStatus::Sent;
                 let _ = self.state_store.put_handle(&handle).await;
                 return Ok(handle);
@@ -188,18 +189,6 @@ impl TransactionManager {
         let buffered = (estimate as u128).saturating_mul(100 + self.gas_buffer_pct) / 100;
         buffered.min(u64::MAX as u128) as u64
     }
-}
-
-/// A transient submit failure is *indeterminate* — the tx may already be in the
-/// mempool — so it is treated as sent, not recycled. A deterministic reject is not.
-fn is_transient_submit(e: &SubmissionError) -> bool {
-    matches!(
-        e,
-        SubmissionError::Rpc(RpcError::Call {
-            transient: true,
-            ..
-        })
-    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -353,5 +342,14 @@ mod tests {
         ));
         let seen = l.lock();
         assert!(seen.contains(&"allocate") && seen.contains(&"release"));
+    }
+
+    #[tokio::test]
+    async fn already_known_submit_assumes_sent_and_keeps_the_nonce() {
+        // "already known"/"nonce too low" == already accepted -> Sent, nonce NOT released.
+        let (tm, l) = manager(true, true, true, Submit::AlreadyKnown);
+        let handle = tm.send(&intent()).await.unwrap();
+        assert_eq!(handle.status, TxStatus::Sent);
+        assert!(!l.lock().contains(&"release"));
     }
 }

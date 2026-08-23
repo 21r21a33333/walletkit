@@ -333,6 +333,8 @@ pub(crate) enum Submit {
     Ok,
     /// Indeterminate (retryable) failure — the tx may already be in the mempool.
     Transient,
+    /// A non-transient "already known" / "nonce too low" — the node already has it.
+    AlreadyKnown,
     /// Deterministic reject — definitely not broadcast.
     Deterministic,
 }
@@ -355,6 +357,10 @@ impl SubmissionStrategy for MockSubmit {
             Submit::Transient => Err(SubmissionError::Rpc(RpcError::Call {
                 message: "timeout".into(),
                 transient: true,
+            })),
+            Submit::AlreadyKnown => Err(SubmissionError::Rpc(RpcError::Call {
+                message: "already known".into(),
+                transient: false,
             })),
             Submit::Deterministic => Err(SubmissionError::Rpc(RpcError::Call {
                 message: "invalid".into(),

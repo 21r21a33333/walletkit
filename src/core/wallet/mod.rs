@@ -7,7 +7,8 @@ mod signing;
 mod transaction_manager;
 
 pub use executor::{
-    AccountExecutor, ChainEvent, ChainView, Finality, FinalityConfig, Outcome, transition,
+    AccountExecutor, ChainEvent, ChainView, ExecutorError, Finality, FinalityConfig, Outcome,
+    transition,
 };
 pub use primitives::{
     Decision, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState, PolicyApproval,
