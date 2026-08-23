@@ -2,6 +2,13 @@
 //! terminal outcomes. Separate from the one-shot send pipeline
 //! ([`TransactionManager`](super::TransactionManager)) because it is a distinct
 //! concern: the send path builds and submits once, the executor tracks forever.
+//!
+//! The pure state machine it drives lives in [`lifecycle`]; this module is its
+//! imperative shell.
+
+mod lifecycle;
+
+pub use lifecycle::{ChainEvent, ChainView, Finality, FinalityConfig, Outcome, transition};
 
 use super::signing;
 use crate::core::deps::{
