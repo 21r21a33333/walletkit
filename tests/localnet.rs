@@ -69,8 +69,7 @@ async fn single_tx_confirms() {
 #[tokio::test]
 async fn overspend_rejects_and_recycles_the_nonce() {
     use alloy_primitives::U256;
-    use walletkit::WalletError;
-    use walletkit::core::wallet::TransactionManagerError;
+    use walletkit::WalletKitError;
 
     let net = localnet!();
     // anvil estimates gas without a balance check, so an over-balance transfer is
@@ -82,10 +81,7 @@ async fn overspend_rejects_and_recycles_the_nonce() {
         .await
         .expect_err("overspend must be rejected");
     assert!(
-        matches!(
-            err,
-            WalletError::Send(TransactionManagerError::Submission(_))
-        ),
+        matches!(err, WalletKitError::Submission(_)),
         "expected a deterministic submit reject, got {err:?}"
     );
 

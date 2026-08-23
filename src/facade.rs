@@ -7,11 +7,11 @@
 use crate::adapters::{
     InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock,
 };
-use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore, StateStoreError};
+use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use crate::core::wallet::{
-    AccountExecutor, ExecutorError, HandleId, TransactionManager, TransactionManagerError,
-    TxHandle, TxIntent, TxStatus,
+    AccountExecutor, HandleId, TransactionManager, TxHandle, TxIntent, TxStatus,
 };
+use crate::error::WalletKitError;
 use alloy_primitives::Address;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,24 +56,25 @@ impl Wallet {
 
     /// Build, sign, and submit an intent, returning its tracked handle. Tracking,
     /// bumping, and confirmation happen on later [`tick`](Wallet::tick)s.
-    pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, WalletError> {
+    pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, WalletKitError> {
         Ok(self.pipeline.send(intent).await?)
     }
 
     /// The full tracked handle by id (terminal-inclusive), or `None` if the id is
     /// unknown — the queryable record (status, nonce, broadcasts, …).
-    pub async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, WalletError> {
+    pub async fn handle(&self, id: HandleId) -> Result<Option<TxHandle>, WalletKitError> {
         Ok(self.store.handle(id).await?)
     }
 
     /// The current status of a tracked handle (terminal-inclusive), or `None` if the
     /// id is unknown.
-    pub async fn status(&self, id: HandleId) -> Result<Option<TxStatus>, WalletError> {
+    pub async fn status(&self, id: HandleId) -> Result<Option<TxStatus>, WalletKitError> {
         Ok(self.handle(id).await?.map(|handle| handle.status))
     }
 
     /// One executor cycle: recover in-flight → confirm progress → escalate stuck.
-    pub async fn tick(&self) -> Result<(), WalletError> {
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
+    pub async fn tick(&self) -> Result<(), WalletKitError> {
         Ok(self.executor.tick().await?)
     }
 
@@ -217,19 +218,6 @@ impl WalletBuilder {
             account,
         }
     }
-}
-
-/// Operational failures the wallet surfaces from its send pipeline, tracking
-/// executor, or state store.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum WalletError {
-    #[error(transparent)]
-    Send(#[from] TransactionManagerError),
-    #[error(transparent)]
-    Execute(#[from] ExecutorError),
-    #[error(transparent)]
-    Store(#[from] StateStoreError),
 }
 
 #[cfg(test)]
