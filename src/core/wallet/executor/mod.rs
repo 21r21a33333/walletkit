@@ -375,7 +375,7 @@ mod tests {
     use crate::core::wallet::GasEnvelope;
     use crate::testutils::{
         Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, Submit,
-        estimation, handle, receipt,
+        estimation, handle, receipt, receipt_unanchored, signed_legacy,
     };
     use alloy_primitives::B256;
 
@@ -632,6 +632,33 @@ mod tests {
         store
     }
 
+    /// Escalate a stuck (Sent, nonce 4) handle whose persisted `signed` is `signed`. A
+    /// working gas oracle (bump 200/1) and allowing policy are wired, so the tx staying
+    /// unbumped can only mean `decode_fees` rejected the body. Returns store + policy.
+    async fn escalate_with_signed(signed: Bytes) -> (Arc<MockStore>, Arc<MockPolicy>) {
+        let policy = Arc::new(MockPolicy::default());
+        let store = Arc::new(MockStore::default());
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .policy(policy.clone())
+            .clock(Arc::new(MockClock(1000)))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        let mut h = handle(4, TxStatus::Sent);
+        h.signed = signed;
+        store.put_handle(&h).await.unwrap();
+        exec.escalate().await.unwrap();
+        (store, policy)
+    }
+
     #[tokio::test]
     async fn bump_within_envelope_reuses_approval() {
         let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
@@ -682,9 +709,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bump_records_broadcast_when_already_known() {
+    async fn bump_records_broadcast_when_already_known_and_persists_new_hash() {
         // "already known" == the replacement is already in the mempool -> record it as a
-        // broadcast (so Confirm can match its receipt), not an error that drops it.
+        // broadcast (so Confirm can match its receipt), not an error that drops it. The
+        // shared mutation block must also advance `signed` to the bumped body, so a later
+        // recover() rebroadcasts the replacement rather than the stale original.
         let store = Arc::new(MockStore::default());
         let exec = Harness::default()
             .rpc(Arc::new(MockRpc {
@@ -711,6 +740,10 @@ mod tests {
         );
         exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2);
+        // signed advanced to the bumped 200/1 body, not the original 100/1.
+        let (fees, _) = decode_fees(&store.all()[0].signed).expect("bumped 1559 body");
+        assert_eq!(fees.max_fee_per_gas, 200);
+        assert_eq!(fees.max_priority_fee_per_gas, 1);
     }
 
     #[tokio::test]
@@ -793,5 +826,104 @@ mod tests {
         exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2); // bumped
         assert_eq!(*policy.calls.lock(), 0); // cached approval reused
+    }
+
+    #[tokio::test]
+    async fn decode_fees_leaves_a_non_1559_signed_tx_unbumped() {
+        // A cleanly-decoding but non-1559 (legacy) body -> decode_fees returns None, so the
+        // bump bails before the oracle/policy. A working oracle is wired, so broadcasts
+        // staying at 1 can only mean decode_fees rejected the body.
+        let signed = signed_legacy(4);
+        let (store, policy) = escalate_with_signed(signed.clone()).await;
+        let h = &store.all()[0];
+        assert_eq!(h.broadcasts.len(), 1);
+        assert_eq!(h.signed, signed); // untouched
+        assert_eq!(h.status, TxStatus::Sent);
+        assert_eq!(*policy.calls.lock(), 0); // never reached policy
+    }
+
+    #[tokio::test]
+    async fn decode_fees_leaves_a_handle_with_undecodable_signed_bytes() {
+        // Garbled persisted bytes (corrupt WAL): a bad EIP-2718 type byte makes decode_2718
+        // Err, so decode_fees returns None via `.ok()?` — the bump short-circuits, no crash.
+        let signed = Bytes::from(vec![0xff, 0x00, 0x01]);
+        let (store, policy) = escalate_with_signed(signed.clone()).await;
+        let h = &store.all()[0];
+        assert_eq!(h.broadcasts.len(), 1);
+        assert_eq!(h.signed, signed);
+        assert_eq!(h.status, TxStatus::Sent);
+        assert_eq!(*policy.calls.lock(), 0);
+    }
+
+    #[tokio::test]
+    async fn bump_transient_submit_error_aborts_without_advancing_broadcasts() {
+        // A non-already-accepted submit error must return before the mutation block,
+        // recording nothing (check submit *before* recording the broadcast). Driven via
+        // the direct bump() since escalate() swallows the per-handle Err.
+        let submit = Arc::new(MockSubmit {
+            outcome: Submit::Transient,
+            ..Default::default()
+        });
+        let store = Arc::new(MockStore::default());
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .submit(submit.clone())
+            .clock(Arc::new(MockClock(1000)))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        let mut h = handle(4, TxStatus::Sent);
+        let original = h.signed.clone();
+        store.put_handle(&h).await.unwrap();
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
+        );
+        let result = exec.bump(&mut h, 1000).await;
+        assert!(matches!(result, Err(ExecutorError::Submission(_))));
+        assert_eq!(submit.seen.lock().len(), 1); // the bump did attempt a broadcast
+        // The mutation block was skipped: no phantom hash, signed still the original.
+        assert_eq!(store.all()[0].broadcasts.len(), 1);
+        assert_eq!(store.all()[0].signed, original);
+    }
+
+    #[tokio::test]
+    async fn repeated_bumps_across_ticks_append_broadcasts_at_the_same_nonce() {
+        // Each stuck tick appends a broadcast (never overwrites) at a stable nonce/id —
+        // the OZ/thirdweb stable-id contract; a bump never advances the lifecycle.
+        let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
+        seed_and_track(&exec, &store, GasEnvelope::DEFAULT).await;
+        for _ in 0..3 {
+            exec.escalate().await.unwrap();
+        }
+        let h = &store.all()[0];
+        assert_eq!(h.broadcasts.len(), 4); // original + one appended per tick
+        assert_eq!(h.nonce, 4);
+        assert_eq!(h.id, handle(4, TxStatus::Sent).id); // id stable across bumps
+        assert_eq!(h.status, TxStatus::Sent);
+        assert_eq!(*policy.calls.lock(), 0); // cached approval reused every round
+    }
+
+    #[tokio::test]
+    async fn receipt_missing_block_anchor_yields_unknown() {
+        // A receipt with no block anchor (or only one of the two fields) is the
+        // pending/partial shape: anchor()'s tuple-destructure guard makes it Unknown and
+        // holds state. `canonical` is set to a hash that would confirm, so only the guard
+        // prevents a transition.
+        let mut half = receipt(true, 8, B256::repeat_byte(1));
+        half.block_hash = None; // block_number Some, block_hash None
+        for r in [receipt_unanchored(), half] {
+            let store = Arc::new(MockStore::default());
+            store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+            run_confirm(&store, 4, 20, Some(r), Some(B256::repeat_byte(1)), 2).await;
+            assert_eq!(store.all()[0].status, TxStatus::Sent);
+        }
     }
 }

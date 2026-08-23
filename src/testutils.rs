@@ -14,7 +14,9 @@ use crate::core::wallet::{
     AccountExecutor, Decision, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState,
     PolicyApproval, PolicyRejection, TransactionManager, TxHandle, TxIntent, TxStatus,
 };
-use alloy_consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom, SignableTransaction, TxEip1559};
+use alloy_consensus::{
+    Receipt, ReceiptEnvelope, ReceiptWithBloom, SignableTransaction, TxEip1559, TxLegacy,
+};
 use alloy_eips::Encodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, U256};
@@ -91,6 +93,22 @@ fn signed_tx(nonce: u64) -> Bytes {
     Bytes::from(tx.into_signed(signature).encoded_2718())
 }
 
+/// A real *legacy* signed-tx encoding — decodes cleanly via EIP-2718 but is not
+/// EIP-1559, so `decode_fees` must reject it (the bump path only reconstructs 1559).
+pub(crate) fn signed_legacy(nonce: u64) -> Bytes {
+    let tx = TxLegacy {
+        chain_id: Some(1),
+        nonce,
+        gas_price: 100,
+        gas_limit: 21_000,
+        to: TxKind::Create,
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signature = Signature::new(U256::from(1), U256::from(1), false);
+    Bytes::from(tx.into_signed(signature).encoded_2718())
+}
+
 pub(crate) fn receipt(success: bool, block: u64, block_hash: B256) -> TransactionReceipt {
     TransactionReceipt {
         inner: ReceiptEnvelope::Eip1559(ReceiptWithBloom {
@@ -113,6 +131,15 @@ pub(crate) fn receipt(success: bool, block: u64, block_hash: B256) -> Transactio
         to: None,
         contract_address: None,
     }
+}
+
+/// A receipt with no block anchor (block number/hash = `None`) — the pending/partial
+/// shape that `anchor()` must treat as `Unknown` rather than trust.
+pub(crate) fn receipt_unanchored() -> TransactionReceipt {
+    let mut r = receipt(true, 0, B256::ZERO);
+    r.block_number = None;
+    r.block_hash = None;
+    r
 }
 
 // ---- Clock ----
