@@ -3,7 +3,6 @@
 //! defines only the methods a Phase-1 consumer calls and reuses alloy data types
 //! rather than inventing its own; the surface grows in later phases.
 //!
-pub mod account;
 pub mod clock;
 pub mod gas_oracle;
 pub mod nonce_manager;
@@ -13,7 +12,6 @@ pub mod signer;
 pub mod state_store;
 pub mod submission;
 
-pub use account::Account;
 pub use clock::Clock;
 pub use gas_oracle::{GasOracle, GasOracleError};
 pub use nonce_manager::{NonceManager, NonceManagerError};

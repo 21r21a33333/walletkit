@@ -3,11 +3,12 @@
 
 mod executor;
 mod primitives;
+mod signing;
 mod transaction_manager;
 
 pub use executor::AccountExecutor;
 pub use primitives::{
-    Decision, GasEnvelope, HandleId, IntentHash, NonceLane, NonceScope, NonceState, PolicyApproval,
+    Decision, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState, PolicyApproval,
     PolicyRejection, TxHandle, TxIntent, TxStatus,
 };
 pub use transaction_manager::{TransactionManager, TransactionManagerError};

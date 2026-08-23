@@ -3,6 +3,7 @@
 //! ([`TransactionManager`](super::TransactionManager)) because it is a distinct
 //! concern: the send path builds and submits once, the executor tracks forever.
 
+use super::signing;
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, PolicyEngine, Rpc, Signer, StateStore,
     SubmissionStrategy,
@@ -11,10 +12,8 @@ use crate::core::wallet::{
     Decision, GasEnvelope, HandleId, PolicyApproval, TransactionManagerError, TxHandle, TxIntent,
     TxStatus,
 };
-use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Address;
 use alloy_rpc_types_eth::TransactionReceipt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -313,27 +312,13 @@ impl AccountExecutor {
             }
         };
 
-        let tx = TxEip1559 {
-            chain_id: tracked.intent.chain_id,
-            nonce: handle.nonce,
-            gas_limit: tracked.gas_limit,
-            max_fee_per_gas: bumped.max_fee_per_gas,
-            max_priority_fee_per_gas: bumped.max_priority_fee_per_gas,
-            to: tracked.intent.to,
-            value: tracked.intent.value,
-            input: tracked.intent.input.clone(),
-            access_list: Default::default(),
-        };
-        let signature = self
-            .signer
-            .sign_transaction(&tx, handle.intent_hash, &approval, now)
-            .await?;
-        let signed = tx.into_signed(signature);
-        let rlp = Bytes::from(signed.encoded_2718());
+        let tx = signing::build_tx(&tracked.intent, handle.nonce, tracked.gas_limit, bumped);
+        let (rlp, tx_hash) =
+            signing::sign_encode(&*self.signer, tx, handle.intent_hash, &approval, now).await?;
         self.submission.submit(rlp.clone()).await?;
 
         handle.signed = rlp;
-        handle.broadcasts.push(*signed.hash());
+        handle.broadcasts.push(tx_hash);
         self.state_store.put_handle(handle).await?;
         tracked.fees = bumped;
         tracked.approval = approval;
@@ -350,7 +335,8 @@ mod tests {
         StateStoreError, SubmissionError, Versioned,
     };
     use crate::core::wallet::{GasEnvelope, IntentHash, NonceScope, NonceState};
-    use alloy_primitives::{B256, Signature, TxHash, TxKind, U256};
+    use alloy_consensus::TxEip1559;
+    use alloy_primitives::{B256, Bytes, Signature, TxHash, TxKind, U256};
     use alloy_rpc_types_eth::TransactionRequest;
     use async_trait::async_trait;
     use std::sync::Mutex;

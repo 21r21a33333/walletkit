@@ -3,6 +3,7 @@
 //! bumping, and reorg handling are the executor's job (Task 17); this is the
 //! fixed-order build path, reusing alloy for all tx mechanics.
 
+use super::signing;
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
@@ -11,10 +12,8 @@ use crate::core::deps::{
 use crate::core::wallet::{
     Decision, HandleId, PolicyApproval, PolicyRejection, TxHandle, TxIntent, TxStatus,
 };
-use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Address;
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use std::sync::Arc;
 
@@ -123,33 +122,25 @@ impl TransactionManager {
         nonce: u64,
         approval: PolicyApproval,
     ) -> Result<TxHandle, TransactionManagerError> {
-        let tx = TxEip1559 {
-            chain_id: intent.chain_id,
-            nonce,
-            gas_limit,
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-            to: intent.to,
-            value: intent.value,
-            input: intent.input.clone(),
-            access_list: Default::default(),
-        };
         let account = intent.account;
         let intent_hash = intent.hash();
+        let tx = signing::build_tx(intent, nonce, gas_limit, fees);
         // Pre-broadcast failure (sign): nothing was sent, so recycle the nonce.
-        let signature = match self
-            .signer
-            .sign_transaction(&tx, intent_hash, &approval, self.clock.now_unix())
-            .await
+        let (rlp, tx_hash) = match signing::sign_encode(
+            &*self.signer,
+            tx,
+            intent_hash,
+            &approval,
+            self.clock.now_unix(),
+        )
+        .await
         {
-            Ok(sig) => sig,
+            Ok(out) => out,
             Err(e) => {
                 let _ = self.nonce_manager.release(account, nonce).await;
                 return Err(e.into());
             }
         };
-        let signed = tx.into_signed(signature);
-        let rlp = Bytes::from(signed.encoded_2718());
 
         let mut handle = TxHandle {
             id: HandleId::new(intent_hash, nonce),
@@ -158,7 +149,7 @@ impl TransactionManager {
             nonce,
             status: TxStatus::Pending,
             signed: rlp.clone(),
-            broadcasts: vec![*signed.hash()],
+            broadcasts: vec![tx_hash],
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.
@@ -244,7 +235,7 @@ mod tests {
     use crate::core::deps::Versioned;
     use crate::core::wallet::{GasEnvelope, NonceScope, NonceState};
     use alloy_consensus::TxEip1559;
-    use alloy_primitives::{Address, Signature, TxHash, TxKind, U256, address};
+    use alloy_primitives::{Address, Bytes, Signature, TxHash, TxKind, U256, address};
     use alloy_rpc_types_eth::TransactionReceipt;
 
     struct TestClock;
