@@ -16,11 +16,12 @@ use crate::core::deps::{
     SubmissionStrategy,
 };
 use crate::core::wallet::{
-    Decision, GasEnvelope, HandleId, PolicyApproval, TransactionManagerError, TxHandle, TxIntent,
-    TxStatus,
+    Decision, HandleId, PolicyApproval, TransactionManagerError, TxHandle, TxStatus,
 };
+use alloy_consensus::TxEnvelope;
+use alloy_eips::Decodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionReceipt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -34,20 +35,6 @@ const DEFAULT_REQUIRED_CONFIRMATIONS: u64 = 12;
 /// Resubmit (bump) a tx that has been pending at least this long (seconds) — OZ's
 /// time-based resubmit. Tunable via [`AccountExecutor::with_bump_timeout`].
 const DEFAULT_BUMP_TIMEOUT_SECS: u64 = 30;
-
-/// In-memory per-tx state the executor needs to bump — none of it is persisted. The
-/// `approval` is a bounded-reuse capability (never on disk); `intent` lets us refresh
-/// an expired approval; `envelope` is the immutable per-intent spend ceiling a bump
-/// must never exceed; `fees` is what we bump from.
-#[derive(Clone)]
-struct TrackedTx {
-    intent: TxIntent,
-    approval: PolicyApproval,
-    envelope: GasEnvelope,
-    gas_limit: u64,
-    fees: Eip1559Estimation,
-    last_broadcast_at: u64,
-}
 
 /// The single consistent chain snapshot a confirm cycle works from — read once up
 /// front so every per-handle decision uses the same view and finality rule.
@@ -73,7 +60,10 @@ pub struct AccountExecutor {
     account: Address,
     required_confirmations: u64,
     bump_timeout: u64,
-    tracking: Mutex<HashMap<HandleId, TrackedTx>>,
+    /// Lossy cache of the one thing a handle can't persist — the bump approval
+    /// capability. A cache miss just means "re-evaluate policy on the next bump", so
+    /// every persisted handle is bump-eligible with or without an entry here.
+    approvals: Mutex<HashMap<HandleId, PolicyApproval>>,
     /// Highest `latest` block seen; a lower reading next cycle is a lagging node and
     /// the cycle is skipped (a stale head must not drive transitions).
     last_latest: AtomicU64,
@@ -111,7 +101,7 @@ impl AccountExecutor {
             account,
             required_confirmations: DEFAULT_REQUIRED_CONFIRMATIONS,
             bump_timeout: DEFAULT_BUMP_TIMEOUT_SECS,
-            tracking: Mutex::new(HashMap::new()),
+            approvals: Mutex::new(HashMap::new()),
             last_latest: AtomicU64::new(0),
         }
     }
@@ -128,29 +118,11 @@ impl AccountExecutor {
         self
     }
 
-    /// Register a freshly-sent tx for tracking and bumping — the send pipeline hands
-    /// off the in-memory state (approval + intent + fees) the executor can't persist.
-    pub fn track(
-        &self,
-        handle: HandleId,
-        intent: TxIntent,
-        approval: PolicyApproval,
-        gas_limit: u64,
-        fees: Eip1559Estimation,
-    ) {
-        let last_broadcast_at = self.clock.now_unix();
-        let envelope = approval.gas_envelope(); // the immutable per-intent spend ceiling
-        self.tracking.lock().insert(
-            handle,
-            TrackedTx {
-                intent,
-                approval,
-                envelope,
-                gas_limit,
-                fees,
-                last_broadcast_at,
-            },
-        );
+    /// Seed the approval cache for a freshly-sent tx so its first bump reuses the
+    /// approval instead of re-evaluating policy. Optional: a bump with no cached
+    /// approval simply re-evaluates from the handle's persisted intent.
+    pub fn track(&self, handle: HandleId, approval: PolicyApproval) {
+        self.approvals.lock().insert(handle, approval);
     }
 
     /// One executor cycle: recover in-flight txs, confirm progress, bump the stuck.
@@ -194,9 +166,9 @@ impl AccountExecutor {
                 continue;
             };
             handle.status = next;
-            // A terminal handle no longer needs its in-memory bump state.
+            // A terminal handle no longer needs its cached approval.
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
-                self.tracking.lock().remove(&handle.id);
+                self.approvals.lock().remove(&handle.id);
             }
         }
         Ok(())
@@ -271,36 +243,31 @@ impl AccountExecutor {
     }
 
     /// Bump every still-pending tx that has outstayed the timeout: raise its fees at
-    /// the **same nonce** (that is RBF), reusing the approval if the new fees stay in
-    /// its envelope, else re-evaluating policy. Stops (leaves the tx) at the gas
-    /// ceiling. Best-effort per handle — one failure doesn't abort the cycle.
+    /// the **same nonce** (RBF). Everything a bump needs comes from the persisted
+    /// handle (only the approval is a cache). Best-effort per handle — one failure
+    /// doesn't abort the cycle.
     pub async fn send(&self) -> Result<(), TransactionManagerError> {
         let mined = self.rpc.tx_count(self.account).await?;
         let now = self.clock.now_unix();
         for mut handle in self.state_store.pending_handles(self.account).await? {
-            // Only txs still in the mempool (Sent, nonce not yet mined) are bumped;
-            // the mined region is Confirm's job.
-            if handle.nonce < mined || !matches!(handle.status, TxStatus::Sent) {
-                continue;
-            }
-            let mut tracked = match self.tracking.lock().get(&handle.id).cloned() {
-                Some(t) if now.saturating_sub(t.last_broadcast_at) >= self.bump_timeout => t,
-                _ => continue,
-            };
-            if self.bump(&mut handle, &mut tracked, now).await.is_ok() {
-                self.tracking.lock().insert(handle.id, tracked);
+            // Only txs still in the mempool (Sent, nonce not yet mined) that have
+            // outstayed the timeout are bumped; the mined region is Confirm's job.
+            let stuck = matches!(handle.status, TxStatus::Sent)
+                && handle.nonce >= mined
+                && now.saturating_sub(handle.last_broadcast_at) >= self.bump_timeout;
+            if stuck {
+                let _ = self.bump(&mut handle, now).await;
             }
         }
         Ok(())
     }
 
-    async fn bump(
-        &self,
-        handle: &mut TxHandle,
-        tracked: &mut TrackedTx,
-        now: u64,
-    ) -> Result<(), TransactionManagerError> {
-        let bumped = match self.gas_oracle.bump(tracked.fees).await {
+    async fn bump(&self, handle: &mut TxHandle, now: u64) -> Result<(), TransactionManagerError> {
+        // The current fees + gas limit live in the persisted signed tx.
+        let Some((fees, gas_limit)) = decode_fees(&handle.signed) else {
+            return Ok(()); // undecodable (never our own tx) -> leave it
+        };
+        let bumped = match self.gas_oracle.bump(fees).await {
             Ok(fees) => fees,
             // At the ceiling we stop and leave the tx as-is (an operator signal, not a retry).
             Err(GasOracleError::CeilingExceeded { .. }) => return Ok(()),
@@ -309,66 +276,97 @@ impl AccountExecutor {
         // The originally-approved envelope is a hard per-intent spend ceiling. A bump
         // beyond it stops (operator signal) rather than silently escalating the approved
         // spend — raising it requires a fresh authorization (Phase 2/3 refill).
-        if !tracked
+        if !handle
             .envelope
             .admits(bumped.max_fee_per_gas, bumped.max_priority_fee_per_gas)
         {
             return Ok(());
         }
-        // Reuse the approval only while it is both valid (unexpired) and covers the bumped
-        // fees; otherwise refresh it via policy (its envelope can't exceed the ceiling
-        // checked above). This mirrors the signer gate so a lapsed TTL can't wedge RBF.
-        let approval = if tracked.approval.valid_until() >= now
-            && tracked
-                .approval
-                .gas_envelope()
-                .admits(bumped.max_fee_per_gas, bumped.max_priority_fee_per_gas)
-        {
-            tracked.approval.clone()
-        } else {
-            match self.policy.evaluate(&tracked.intent).await? {
-                Decision::Allow(approval) => approval,
-                Decision::Deny(_) => return Ok(()), // policy revoked -> leave the tx
-            }
+        let Some(approval) = self.bump_approval(handle, bumped, now).await? else {
+            return Ok(()); // policy revoked or tightened below the bump -> leave the tx
         };
 
-        let tx = signing::build_tx(&tracked.intent, handle.nonce, tracked.gas_limit, bumped);
+        let tx = signing::build_tx(&handle.intent, handle.nonce, gas_limit, bumped);
         let (rlp, tx_hash) =
             signing::sign_encode(&*self.signer, tx, handle.intent_hash, &approval, now).await?;
         self.submission.submit(rlp.clone()).await?;
 
         handle.signed = rlp;
         handle.broadcasts.push(tx_hash);
+        handle.last_broadcast_at = now;
         self.state_store.put_handle(handle).await?;
-        tracked.fees = bumped;
-        tracked.approval = approval;
-        tracked.last_broadcast_at = now;
+        self.approvals.lock().insert(handle.id, approval);
         Ok(())
+    }
+
+    /// The approval to sign a bump with: reuse the cached one while it is valid and
+    /// covers the bumped fees, else re-evaluate policy from the persisted intent (which
+    /// mirrors the signer gate, so a lapsed TTL can't wedge RBF). `None` means policy
+    /// denied or returned an envelope that no longer covers the bump — leave the tx.
+    async fn bump_approval(
+        &self,
+        handle: &TxHandle,
+        bumped: Eip1559Estimation,
+        now: u64,
+    ) -> Result<Option<PolicyApproval>, TransactionManagerError> {
+        let admits = |a: &PolicyApproval| {
+            a.gas_envelope()
+                .admits(bumped.max_fee_per_gas, bumped.max_priority_fee_per_gas)
+        };
+        let cached = self.approvals.lock().get(&handle.id).cloned();
+        if let Some(approval) = cached
+            && approval.valid_until() >= now
+            && admits(&approval)
+        {
+            return Ok(Some(approval));
+        }
+        match self.policy.evaluate(&handle.intent).await? {
+            Decision::Allow(approval) => Ok(admits(&approval).then_some(approval)),
+            Decision::Deny(_) => Ok(None),
+        }
+    }
+}
+
+/// Recover the fee fields + gas limit from a persisted EIP-1559 signed tx (Phase 1
+/// only builds 1559); anything else can't be bumped by this path.
+fn decode_fees(signed: &Bytes) -> Option<(Eip1559Estimation, u64)> {
+    match TxEnvelope::decode_2718(&mut signed.as_ref()).ok()? {
+        TxEnvelope::Eip1559(signed_tx) => {
+            let tx = signed_tx.tx();
+            let fees = Eip1559Estimation {
+                max_fee_per_gas: tx.max_fee_per_gas,
+                max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
+            };
+            Some((fees, tx.gas_limit))
+        }
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::wallet::GasEnvelope;
     use crate::testutils::{
         Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, estimation,
-        handle, intent, receipt,
+        handle, receipt,
     };
-    use alloy_primitives::{B256, Bytes};
+    use alloy_primitives::B256;
 
     // --- Recover / confirm ---
 
     #[tokio::test]
     async fn recover_rebroadcasts_persisted_inflight_after_restart() {
         let store = Arc::new(MockStore::default());
-        store.put_handle(&handle(4, TxStatus::Sent)).await.unwrap();
+        let h = handle(4, TxStatus::Sent);
+        store.put_handle(&h).await.unwrap();
         let submit = Arc::new(MockSubmit::default());
         let exec = Harness::default()
             .submit(submit.clone())
             .store(store.clone())
             .executor();
         exec.recover().await.unwrap();
-        assert_eq!(*submit.seen.lock(), vec![Bytes::from_static(&[1, 2, 3])]);
+        assert_eq!(*submit.seen.lock(), vec![h.signed]);
     }
 
     /// Run one confirm cycle against a fixed chain view. `canonical` is the hash
@@ -574,10 +572,13 @@ mod tests {
     }
 
     async fn seed_and_track(exec: &AccountExecutor, store: &MockStore, envelope: GasEnvelope) {
-        let h = handle(4, TxStatus::Sent);
+        let mut h = handle(4, TxStatus::Sent);
+        h.envelope = envelope;
         store.put_handle(&h).await.unwrap();
-        let approval = PolicyApproval::mint(B256::ZERO, envelope, u64::MAX);
-        exec.track(h.id, intent(), approval, 21_000, estimation(100, 1));
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, envelope, u64::MAX),
+        );
     }
 
     #[tokio::test]
@@ -611,8 +612,10 @@ mod tests {
         let (exec, store, policy) = send_setup(Some(estimation(200, 1)));
         let h = handle(4, TxStatus::Sent);
         store.put_handle(&h).await.unwrap();
-        let expired = PolicyApproval::mint(B256::ZERO, GasEnvelope::DEFAULT, 0);
-        exec.track(h.id, intent(), expired, 21_000, estimation(100, 1));
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, 0),
+        );
         exec.send().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2); // bumped
         assert_eq!(*policy.calls.lock(), 1); // refreshed (was expired), not reused

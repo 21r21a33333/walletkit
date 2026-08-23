@@ -124,32 +124,30 @@ impl TransactionManager {
     ) -> Result<TxHandle, TransactionManagerError> {
         let account = intent.account;
         let intent_hash = intent.hash();
+        let now = self.clock.now_unix();
         let tx = signing::build_tx(intent, nonce, gas_limit, fees);
         // Pre-broadcast failure (sign): nothing was sent, so recycle the nonce.
-        let (rlp, tx_hash) = match signing::sign_encode(
-            &*self.signer,
-            tx,
-            intent_hash,
-            &approval,
-            self.clock.now_unix(),
-        )
-        .await
-        {
-            Ok(out) => out,
-            Err(e) => {
-                let _ = self.nonce_manager.release(account, nonce).await;
-                return Err(e.into());
-            }
-        };
+        let (rlp, tx_hash) =
+            match signing::sign_encode(&*self.signer, tx, intent_hash, &approval, now).await {
+                Ok(out) => out,
+                Err(e) => {
+                    let _ = self.nonce_manager.release(account, nonce).await;
+                    return Err(e.into());
+                }
+            };
 
         let mut handle = TxHandle {
             id: HandleId::new(intent_hash, nonce),
             account,
+            intent: intent.clone(),
             intent_hash,
             nonce,
             status: TxStatus::Pending,
+            // The originally-approved ceiling; a later bump must never exceed it.
+            envelope: approval.gas_envelope(),
             signed: rlp.clone(),
             broadcasts: vec![tx_hash],
+            last_broadcast_at: now,
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.

@@ -1,4 +1,4 @@
-use super::IntentHash;
+use super::{GasEnvelope, IntentHash, TxIntent};
 use alloy_primitives::{Address, B256, Bytes, TxHash, keccak256};
 
 /// Stable, queryable id for a tracked transaction — derived from intent + nonce so
@@ -56,18 +56,27 @@ impl TxStatus {
     }
 }
 
-/// Stable, persisted handle to a submitted transaction — the queryable unit a
-/// caller tracks, and the crash-recovery WAL record. `signed` is the latest signed
-/// tx (persisted before broadcast so the executor can rebroadcast it verbatim);
-/// `broadcasts` holds the original and (Task 17) each bump hash, so the mined hash
-/// distinguishes ours from a replacement.
+/// Stable, persisted handle to a submitted transaction — the single source of truth
+/// for a tracked tx: the queryable unit a caller tracks, the crash-recovery WAL
+/// record, and everything the executor needs to bump it, *except* the
+/// [`PolicyApproval`](super::PolicyApproval) capability (which is never persisted).
+///
+/// `intent` is the semantic request (kept so a bump can re-evaluate policy — the
+/// signed bytes drop `purpose`); `envelope` is the immutable per-intent spend ceiling
+/// a bump must never exceed; `signed` is the latest signed tx (persisted before
+/// broadcast so it can be rebroadcast verbatim), with `fees`/`gas_limit` decoded from
+/// it on demand; `broadcasts` holds the original and each bump hash, so the mined hash
+/// distinguishes ours from a replacement; `last_broadcast_at` drives the bump timeout.
 #[derive(Debug, Clone)]
 pub struct TxHandle {
     pub id: HandleId,
     pub account: Address,
+    pub intent: TxIntent,
     pub intent_hash: IntentHash,
     pub nonce: u64,
     pub status: TxStatus,
+    pub envelope: GasEnvelope,
     pub signed: Bytes,
     pub broadcasts: Vec<TxHash>,
+    pub last_broadcast_at: u64,
 }

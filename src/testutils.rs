@@ -14,7 +14,8 @@ use crate::core::wallet::{
     AccountExecutor, Decision, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState,
     PolicyApproval, PolicyRejection, TransactionManager, TxHandle, TxIntent, TxStatus,
 };
-use alloy_consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom, TxEip1559};
+use alloy_consensus::{Receipt, ReceiptEnvelope, ReceiptWithBloom, SignableTransaction, TxEip1559};
+use alloy_eips::Encodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, U256};
 use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
@@ -53,17 +54,41 @@ pub(crate) fn intent() -> TxIntent {
     }
 }
 
-/// An in-flight handle for the zero account with a fixed signed body + one broadcast.
+/// An in-flight handle for the zero account, carrying a real (decodable) signed tx so
+/// bump logic can read its fees/gas; the default envelope admits typical bumps.
 pub(crate) fn handle(nonce: u64, status: TxStatus) -> TxHandle {
+    let intent = intent();
+    let intent_hash = intent.hash();
     TxHandle {
-        id: HandleId::new(B256::ZERO, nonce),
+        id: HandleId::new(intent_hash, nonce),
         account: Address::ZERO,
-        intent_hash: B256::ZERO,
+        intent,
+        intent_hash,
         nonce,
         status,
-        signed: Bytes::from_static(&[1, 2, 3]),
+        envelope: GasEnvelope::DEFAULT,
+        signed: signed_tx(nonce),
         broadcasts: vec![TxHash::ZERO],
+        last_broadcast_at: 0,
     }
+}
+
+/// A real EIP-1559 signed-tx encoding (fees 100/1, gas 21_000) — a decodable body for
+/// the bump path, which recovers fees/gas from the persisted `signed` bytes.
+fn signed_tx(nonce: u64) -> Bytes {
+    let tx = TxEip1559 {
+        chain_id: 1,
+        nonce,
+        gas_limit: 21_000,
+        max_fee_per_gas: 100,
+        max_priority_fee_per_gas: 1,
+        to: TxKind::Create,
+        value: U256::ZERO,
+        input: Bytes::new(),
+        access_list: Default::default(),
+    };
+    let signature = Signature::new(U256::from(1), U256::from(1), false);
+    Bytes::from(tx.into_signed(signature).encoded_2718())
 }
 
 pub(crate) fn receipt(success: bool, block: u64, block_hash: B256) -> TransactionReceipt {
