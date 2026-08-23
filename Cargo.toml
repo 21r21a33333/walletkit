@@ -27,6 +27,8 @@ thiserror = "2.0.20"
 # policy-moonpay (opt-in): the OWS executable runs as a wasip1 plugin; wasmtime is
 # heavy (cranelift), so it's gated. time parses OWS `expires_at` timestamps.
 time = { version = "0.3", features = ["parsing"], optional = true }
+# runtime for the facade's opt-in `run(interval)` background tick loop.
+tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros"] }
 tower = "0.5.3"
 url = { version = "2.5.8", features = ["serde"] }
 wasmtime = { version = "36", optional = true }
