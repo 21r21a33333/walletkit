@@ -10,8 +10,8 @@ pub struct NonceState {
     pub free: BTreeSet<u64>,
 }
 
-/// The key a [`NonceState`] is stored under. Phase 1 keys by account (EOA); a 4337
-/// 2D-nonce lane is added here in Phase 5 without changing the manager.
+/// The key a [`NonceState`] is stored under. Keyed by account (EOA); a 4337 2D-nonce
+/// lane can be added here without changing the manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NonceScope {
     pub account: Address,
@@ -26,7 +26,7 @@ impl NonceScope {
 /// Opaque, monotonic ownership token for the single-writer nonce seam. The
 /// [`StateStore`](crate::core::deps::StateStore) records the highest token committed per
 /// scope and rejects any lower one (fencing enforced at the resource, per Kleppmann).
-/// Phase 1 uses [`SINGLE_WRITER`](FenceToken::SINGLE_WRITER) only; a distributed lease
+/// Only [`SINGLE_WRITER`](FenceToken::SINGLE_WRITER) is used today; a distributed lease
 /// issuer mints real tokens later with no trait change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FenceToken(u64);

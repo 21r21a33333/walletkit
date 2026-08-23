@@ -73,9 +73,9 @@ impl WalletKitError {
         self.kind() == ErrorKind::Retryable
     }
 
-    /// A suggested minimum backoff. `None` in Phase 1 — a real value arrives when the
-    /// Transport surfaces server `Retry-After`/rate-limit hints; until then,
-    /// [`is_retryable`](Self::is_retryable) is the signal and the host paces retries.
+    /// A suggested minimum backoff. `None` until the Transport surfaces server
+    /// `Retry-After`/rate-limit hints; until then [`is_retryable`](Self::is_retryable) is
+    /// the signal and the host paces retries.
     pub fn retry_after(&self) -> Option<Duration> {
         None
     }

@@ -5,9 +5,9 @@
 //! The states are [`TxStatus`] itself — the FSM states *are* the persisted
 //! statuses, so there is no parallel type to keep in sync. The shell distills each
 //! unreliable chain read into one trustworthy [`ChainEvent`] (hash-anchored) and
-//! this function decides the next status. The safety property the whole refactor
-//! turns on: an ambiguous read arrives as [`ChainEvent::Unknown`], which is
-//! **never** a transition — a bad read can neither advance nor rewind the lifecycle.
+//! this function decides the next status. The core safety property: an ambiguous read
+//! arrives as [`ChainEvent::Unknown`], which is **never** a transition — a bad read can
+//! neither advance nor rewind the lifecycle.
 //!
 //! [`AccountExecutor`]: super::AccountExecutor
 

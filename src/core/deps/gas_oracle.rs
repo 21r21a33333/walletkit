@@ -3,7 +3,7 @@ use alloy_eips::eip1559::Eip1559Estimation;
 use async_trait::async_trait;
 
 /// EIP-1559 fee pricing for a chain-bound RPC: an initial estimate and the
-/// replacement (RBF) bump used to unstick a pending tx (same nonce — Task 17).
+/// replacement (RBF) bump used to unstick a pending tx (same nonce).
 #[async_trait]
 pub trait GasOracle: Send + Sync {
     /// Base-fee-aware max fee + priority tip (alloy's default estimator).

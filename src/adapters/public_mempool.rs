@@ -1,6 +1,6 @@
-//! `PublicMempool` — the Phase-1 [`SubmissionStrategy`]: a thin passthrough to
-//! `eth_sendRawTransaction`. The seam lets Phase 2 add private/relayer/paymaster
-//! strategies without touching the pipeline.
+//! `PublicMempool` — the default [`SubmissionStrategy`]: a thin passthrough to
+//! `eth_sendRawTransaction`. The seam lets private/relayer/paymaster strategies slot in
+//! without touching the pipeline.
 
 use crate::core::deps::{Rpc, SubmissionError, SubmissionStrategy};
 use crate::obs::debug;

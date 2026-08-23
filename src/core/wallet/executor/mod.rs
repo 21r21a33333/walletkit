@@ -298,7 +298,7 @@ impl AccountExecutor {
         };
         // The originally-approved envelope is a hard per-intent spend ceiling. A bump
         // beyond it stops (operator signal) rather than silently escalating the approved
-        // spend — raising it requires a fresh authorization (Phase 2/3 refill).
+        // spend — raising it requires a fresh authorization.
         if !handle
             .envelope
             .admits(bumped.max_fee_per_gas, bumped.max_priority_fee_per_gas)
@@ -357,8 +357,8 @@ impl AccountExecutor {
     }
 }
 
-/// Recover the fee fields + gas limit from a persisted EIP-1559 signed tx (Phase 1
-/// only builds 1559); anything else can't be bumped by this path.
+/// Recover the fee fields + gas limit from a persisted EIP-1559 signed tx; a non-1559
+/// envelope can't be bumped by this path.
 fn decode_fees(signed: &Bytes) -> Option<(Eip1559Estimation, u64)> {
     match TxEnvelope::decode_2718(&mut signed.as_ref()).ok()? {
         TxEnvelope::Eip1559(signed_tx) => {

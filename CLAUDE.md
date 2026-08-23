@@ -31,7 +31,11 @@ These rules override default behavior and MUST be followed for every task.
 ## Code quality (rust-lang/rust AGENTS.md discipline)
 
 - Comments explain **why, not what** — short and minimal; most lines need none.
-  **No comment-per-change.**
+  **No comment-per-change.** Comments describe the code **as it is**, never the plan or the
+  history: **no dev-process breadcrumbs** — no task/step numbers (`Task 17`, `8b`, `C-T3`),
+  no "grows in Phase N" / "arrives later" future-promises, no "was/used to/refactored"
+  narration. A spec anchor that aids understanding *now* (`EIP-2`, `§5.2`, `Kleppmann`) is
+  fine; a roadmap reference is noise. Keep doc summaries to 1–2 tight sentences.
 - Idiomatic, consistent naming: reads/lookups are `get_…`→ prefer bare noun
   accessors (drop `get_`), writes are plain domain verbs, predicates use
   `is_`/`supports_`. Fix outliers to match house style.

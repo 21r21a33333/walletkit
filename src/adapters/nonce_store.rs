@@ -5,22 +5,20 @@
 //! single-process store. alloy's manager is not reused (not object-safe, known
 //! recovery bugs); alloy is used only for the chain read via the [`Rpc`] port.
 //!
-//! # Assumptions & recovery (research-backed — see the plan's nonce section)
+//! # Assumptions & recovery
 //! **Single writer.** The manager exclusively owns the account key — the universal
 //! production posture (OZ Defender, thirdweb Engine). An out-of-band tx (the key
 //! signed elsewhere) surfaces as `nonce too low` at submit and is recovered by
 //! [`reset`](crate::core::deps::NonceManager::reset) to the chain's `latest` count;
-//! the executor (Task 17) also reconciles against the chain each confirm cycle.
-//! `pending` is only a forward hint (per-node/racy); `latest` is authoritative.
+//! the executor also reconciles against the chain each confirm cycle. `pending` is only
+//! a forward hint (per-node/racy); `latest` is authoritative.
 //!
 //! **Crash recovery is NOT complete from `NonceState { next, free }` alone** — it
-//! cannot tell an in-flight (broadcast) nonce from a dropped one. Durable recovery
-//! needs (a) a durable `StateStore` (Phase 3) persisting `{next, free}` and (b) a
-//! **persist-before-broadcast WAL of signed txs** (the persisted `TxHandle`, Task
-//! 17): on boot `next = max(persisted, chain)`, drain the WAL rebroadcasting the
-//! signed bytes (idempotent), and classify accepted → in-flight vs
-//! deterministically-rejected → recycle. `InMemoryStateStore` is non-durable, so
-//! Phase-1 recovery is single-run.
+//! cannot tell an in-flight (broadcast) nonce from a dropped one. Durable recovery needs
+//! a durable `StateStore` plus the persist-before-broadcast `TxHandle` WAL: on boot
+//! `next = max(persisted, chain)`, drain the WAL rebroadcasting the signed bytes
+//! (idempotent), and classify accepted → in-flight vs rejected → recycle.
+//! `InMemoryStateStore` is non-durable, so its recovery is single-run.
 
 use crate::core::deps::{
     NonceManager, NonceManagerError, Rpc, StateStore, StateStoreError, Versioned,

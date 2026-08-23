@@ -1,7 +1,7 @@
 //! Object-safe ports (`Arc<dyn _>`, `Send + Sync`, `#[async_trait]`) that adapters
-//! implement. One file per port, each owning its own `{TraitName}Error`. Each
-//! defines only the methods a Phase-1 consumer calls and reuses alloy data types
-//! rather than inventing its own; the surface grows in later phases.
+//! implement. One file per port, each owning its own `{TraitName}Error`. Each defines
+//! only the methods a consumer actually calls and reuses alloy data types rather than
+//! inventing its own.
 //!
 pub mod clock;
 pub mod gas_oracle;

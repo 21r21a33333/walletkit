@@ -2,7 +2,7 @@
 //! runtime (the send pipeline + the tracking executor) behind a small public API.
 //! One `Wallet` is one account (the signer defines it), so single-executor-per-account
 //! is structural. Host-driven: [`tick`](Wallet::tick) runs one recover→confirm→escalate
-//! pass; a background runner is opt-in sugar (added next).
+//! pass; a background runner is opt-in sugar.
 
 use crate::adapters::{
     InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock,

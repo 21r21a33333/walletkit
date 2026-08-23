@@ -1,7 +1,7 @@
 //! `TransactionManager` — the one-shot send pipeline: it turns a [`TxIntent`] into
 //! a broadcast transaction plus a persisted, queryable [`TxHandle`]. Tracking,
-//! bumping, and reorg handling are the executor's job (Task 17); this is the
-//! fixed-order build path, reusing alloy for all tx mechanics.
+//! bumping, and reorg handling are the executor's job; this is the fixed-order build
+//! path, reusing alloy for all tx mechanics.
 
 use super::signing;
 use crate::core::deps::{

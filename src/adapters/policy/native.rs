@@ -18,8 +18,8 @@ pub enum Verdict {
 }
 
 /// A native, in-process policy rule. Users may implement this to add their own
-/// rule; richer/declarative policy comes from the Regorus (8b) or WASM (8c)
-/// engines, not new hand-written predicates here.
+/// rule; richer/declarative policy comes from the Regorus or WASM engines, not new
+/// hand-written predicates here.
 pub trait Policy: Send + Sync {
     fn check(&self, intent: &TxIntent) -> Verdict;
 }

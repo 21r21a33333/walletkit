@@ -12,7 +12,7 @@ pub struct Versioned<T> {
 
 /// Durable state behind the executor, accessed via compare-and-swap so one
 /// [`NonceManager`](super::NonceManager) serves both single-process and distributed
-/// deployments — only the store changes. Phase 1 holds per-scope nonce state.
+/// deployments — only the store changes.
 #[async_trait]
 pub trait StateStore: Send + Sync {
     /// Load a scope's nonce state with its version (absent → `Versioned::default`).
