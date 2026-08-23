@@ -1,12 +1,13 @@
-use crate::core::wallet::{IntentHash, PolicyApproval};
+use crate::core::wallet::{IntentHash, PolicyApproval, SignatureEnvelope, SigningError};
 use alloy_consensus::TxEip1559;
+use alloy_dyn_abi::TypedData;
 use alloy_primitives::{Address, Signature};
 use async_trait::async_trait;
 
-/// Signs transactions for one account. Signature-only (no key export); the signer
-/// enforces the [`PolicyApproval`] gate — bound intent, fees within the approved
-/// envelope, and not expired at `now` — making policy→sign structural. Takes the
-/// approval by reference so a bump within the envelope can reuse it (§5.1).
+/// Signs for one account. Signature-only (no key export); every method enforces the
+/// [`PolicyApproval`] gate — bound payload, and not expired at `now` (plus the fee envelope
+/// for a tx) — making policy→sign structural. Takes the approval by reference so a bump
+/// within the envelope can reuse it (§5.1).
 #[async_trait]
 pub trait Signer: Send + Sync {
     fn address(&self) -> Address;
@@ -18,6 +19,22 @@ pub trait Signer: Send + Sync {
         approval: &PolicyApproval,
         now: u64,
     ) -> Result<Signature, SignerError>;
+
+    /// Sign an EIP-191 `personal_sign` message (the `0x19` prefix is applied here).
+    async fn sign_message(
+        &self,
+        message: &[u8],
+        approval: &PolicyApproval,
+        now: u64,
+    ) -> Result<SignatureEnvelope, SignerError>;
+
+    /// Sign EIP-712 typed data (domain `chainId` validated before signing).
+    async fn sign_typed_data(
+        &self,
+        typed: &TypedData,
+        approval: &PolicyApproval,
+        now: u64,
+    ) -> Result<SignatureEnvelope, SignerError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +52,10 @@ pub enum SignerError {
     /// The approval's validity window has passed.
     #[error("policy approval expired")]
     ApprovalExpired,
+    /// The signing payload is malformed (e.g. an EIP-712 zero-chain domain or a value that
+    /// won't encode) — never signable as-is.
+    #[error(transparent)]
+    Payload(#[from] SigningError),
     /// The backend failed to produce a signature.
     #[error("signing failed: {0}")]
     Backend(String),

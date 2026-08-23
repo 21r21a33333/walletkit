@@ -65,6 +65,15 @@ pub struct SignatureEnvelope {
 }
 
 impl SignatureEnvelope {
+    /// Wrap a secp256k1 ECDSA signature (the only scheme today) with its signer.
+    pub(crate) fn secp256k1(signer: Address, signature: Signature) -> Self {
+        Self {
+            scheme: SigningScheme::Secp256k1Ecdsa,
+            signer,
+            signature,
+        }
+    }
+
     pub fn scheme(&self) -> SigningScheme {
         self.scheme
     }

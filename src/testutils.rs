@@ -12,12 +12,13 @@ use crate::core::deps::{
 };
 use crate::core::wallet::{
     AccountExecutor, Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope,
-    NonceState, PolicyApproval, PolicyRejection, SigningRequest, TransactionManager, TxHandle,
-    TxIntent, TxStatus,
+    NonceState, PolicyApproval, PolicyRejection, SignatureEnvelope, SigningRequest,
+    TransactionManager, TxHandle, TxIntent, TxStatus,
 };
 use alloy_consensus::{
     Receipt, ReceiptEnvelope, ReceiptWithBloom, SignableTransaction, TxEip1559, TxLegacy,
 };
+use alloy_dyn_abi::TypedData;
 use alloy_eips::Encodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, U256};
@@ -586,6 +587,39 @@ impl Signer for MockSigner {
         note(&self.log, "sign");
         if self.ok {
             Ok(Signature::new(U256::from(1), U256::from(1), false))
+        } else {
+            Err(SignerError::Backend("boom".into()))
+        }
+    }
+
+    async fn sign_message(
+        &self,
+        _: &[u8],
+        _: &PolicyApproval,
+        _: u64,
+    ) -> Result<SignatureEnvelope, SignerError> {
+        note(&self.log, "sign");
+        self.envelope()
+    }
+
+    async fn sign_typed_data(
+        &self,
+        _: &TypedData,
+        _: &PolicyApproval,
+        _: u64,
+    ) -> Result<SignatureEnvelope, SignerError> {
+        note(&self.log, "sign");
+        self.envelope()
+    }
+}
+
+impl MockSigner {
+    fn envelope(&self) -> Result<SignatureEnvelope, SignerError> {
+        if self.ok {
+            Ok(SignatureEnvelope::secp256k1(
+                self.address,
+                Signature::new(U256::from(1), U256::from(1), false),
+            ))
         } else {
             Err(SignerError::Backend("boom".into()))
         }

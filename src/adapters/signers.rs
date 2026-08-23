@@ -4,9 +4,12 @@
 //! private key stays inside alloy.
 
 use crate::core::deps::{Signer, SignerError};
-use crate::core::wallet::{IntentHash, PolicyApproval};
+use crate::core::wallet::{
+    IntentHash, PolicyApproval, SignatureEnvelope, enforce_low_s, typed_data_hash,
+};
 use alloy_consensus::{SignableTransaction, TxEip1559};
-use alloy_primitives::{Address, Signature};
+use alloy_dyn_abi::TypedData;
+use alloy_primitives::{Address, B256, Signature, eip191_hash_message};
 use alloy_signer::SignerSync;
 use alloy_signer_local::coins_bip39::English;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
@@ -51,6 +54,33 @@ impl LocalSigner {
             .map_err(load)?;
         Ok(Self { inner })
     }
+
+    /// The structural gate shared by every signing method: the approval must bind this
+    /// payload and not be expired. (A tx additionally checks the fee envelope.)
+    fn gate(
+        &self,
+        approval: &PolicyApproval,
+        payload_hash: B256,
+        now: u64,
+    ) -> Result<(), SignerError> {
+        if !approval.authorizes(payload_hash) {
+            return Err(SignerError::ApprovalMismatch);
+        }
+        if now > approval.valid_until() {
+            return Err(SignerError::ApprovalExpired);
+        }
+        Ok(())
+    }
+
+    /// Sign a prehash and enforce EIP-2 low-s. Local signing is CPU-only, so the sync path
+    /// avoids an executor round-trip.
+    fn sign_hash_low_s(&self, hash: &B256) -> Result<Signature, SignerError> {
+        let sig = self
+            .inner
+            .sign_hash_sync(hash)
+            .map_err(|e| SignerError::Backend(e.to_string()))?;
+        Ok(enforce_low_s(sig))
+    }
 }
 
 #[async_trait]
@@ -66,23 +96,44 @@ impl Signer for LocalSigner {
         approval: &PolicyApproval,
         now: u64,
     ) -> Result<Signature, SignerError> {
-        // Structural gate: bound intent, fees within the approved envelope, unexpired.
-        if !approval.authorizes(intent_hash) {
-            return Err(SignerError::ApprovalMismatch);
-        }
-        if now > approval.valid_until() {
-            return Err(SignerError::ApprovalExpired);
-        }
+        self.gate(approval, intent_hash, now)?;
+        // A tx additionally must price within the approved envelope; a bump beyond it is
+        // re-evaluated by policy.
         if !approval
             .gas_envelope()
             .admits(tx.max_fee_per_gas, tx.max_priority_fee_per_gas)
         {
             return Err(SignerError::FeesExceedApproval);
         }
-        // Local signing is CPU-only; the sync path avoids an executor round-trip.
-        self.inner
-            .sign_hash_sync(&tx.signature_hash())
-            .map_err(|e| SignerError::Backend(e.to_string()))
+        self.sign_hash_low_s(&tx.signature_hash())
+    }
+
+    async fn sign_message(
+        &self,
+        message: &[u8],
+        approval: &PolicyApproval,
+        now: u64,
+    ) -> Result<SignatureEnvelope, SignerError> {
+        let hash = eip191_hash_message(message);
+        self.gate(approval, hash, now)?;
+        Ok(SignatureEnvelope::secp256k1(
+            self.address(),
+            self.sign_hash_low_s(&hash)?,
+        ))
+    }
+
+    async fn sign_typed_data(
+        &self,
+        typed: &TypedData,
+        approval: &PolicyApproval,
+        now: u64,
+    ) -> Result<SignatureEnvelope, SignerError> {
+        let hash = typed_data_hash(typed)?; // domain-chainId guard, single source of truth
+        self.gate(approval, hash, now)?;
+        Ok(SignatureEnvelope::secp256k1(
+            self.address(),
+            self.sign_hash_low_s(&hash)?,
+        ))
     }
 }
 
@@ -152,6 +203,61 @@ mod tests {
                 .sign_transaction(&tx(50), intent, &approval(intent, 0), 1)
                 .await,
             Err(SignerError::ApprovalExpired)
+        ));
+    }
+
+    fn approval_for(bound: B256) -> PolicyApproval {
+        PolicyApproval::mint(bound, GasEnvelope::DEFAULT, u64::MAX)
+    }
+
+    #[tokio::test]
+    async fn signs_message_recovers_to_signer_and_is_low_s() {
+        let signer = LocalSigner::from_mnemonic(MNEMONIC, 0).unwrap();
+        let msg = b"login to example.com";
+        let env = signer
+            .sign_message(msg, &approval_for(eip191_hash_message(msg)), 0)
+            .await
+            .unwrap();
+        // Recovering via EIP-191 proves the 0x19 prefix was applied.
+        assert_eq!(
+            env.signature().recover_address_from_msg(msg).unwrap(),
+            signer.address()
+        );
+        assert!(env.signature().normalize_s().is_none(), "low-s");
+    }
+
+    #[tokio::test]
+    async fn signs_typed_data_recovers_to_signer() {
+        let signer = LocalSigner::from_mnemonic(MNEMONIC, 0).unwrap();
+        let json = serde_json::json!({
+            "types": {
+                "EIP712Domain": [{ "name": "chainId", "type": "uint256" }],
+                "M": [{ "name": "x", "type": "uint256" }]
+            },
+            "primaryType": "M",
+            "domain": { "chainId": 1 },
+            "message": { "x": "1" }
+        });
+        let typed: TypedData = serde_json::from_value(json).unwrap();
+        let hash = typed_data_hash(&typed).unwrap();
+        let env = signer
+            .sign_typed_data(&typed, &approval_for(hash), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            env.signature().recover_address_from_prehash(&hash).unwrap(),
+            signer.address()
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_message_trips_the_gate_on_wrong_payload() {
+        let signer = LocalSigner::from_mnemonic(MNEMONIC, 0).unwrap();
+        assert!(matches!(
+            signer
+                .sign_message(b"x", &approval_for(B256::ZERO), 0)
+                .await,
+            Err(SignerError::ApprovalMismatch)
         ));
     }
 }
