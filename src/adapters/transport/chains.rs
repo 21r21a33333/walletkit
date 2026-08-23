@@ -10,11 +10,12 @@
 //! crate embeds a snapshot (`public_endpoints.json`) for offline use;
 //! [`refresh_public_endpoints`] pulls the live list at runtime (opt-in).
 
-use super::{Transport, TransportBuilder};
+use super::{Transport, TransportBuildError, TransportBuilder};
 use crate::core::deps::RpcError;
+use parking_lot::RwLock;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 use url::Url;
 
 /// eRPC's live, hourly-refreshed public-endpoints catalog (the "repository" source).
@@ -56,7 +57,6 @@ fn parse(json: &str) -> HashMap<u64, Vec<Url>> {
 pub fn public_rpcs(chain_id: u64) -> Vec<Url> {
     registry()
         .read()
-        .unwrap()
         .get(&chain_id)
         .cloned()
         .unwrap_or_default()
@@ -88,7 +88,7 @@ pub async fn refresh_public_endpoints() -> Result<usize, RpcError> {
         });
     }
     let count = fresh.len();
-    *registry().write().unwrap() = fresh;
+    *registry().write() = fresh;
     Ok(count)
 }
 
@@ -197,9 +197,12 @@ pub fn vendor_url(vendor: Vendor, api_key: &str, chain_id: u64) -> Option<Url> {
 
 impl Transport {
     /// A transport over a chain's curated **public** defaults (primary + up to a few
-    /// fallbacks). `None` if the chain isn't in the registry. Dev only — see the module docs.
-    pub fn for_chain(chain_id: u64) -> Option<Transport> {
-        Some(Transport::builder_for_chain(chain_id)?.build())
+    /// fallbacks). Dev only — see the module docs. `Err` if the chain is unknown or the
+    /// client can't be built.
+    pub fn for_chain(chain_id: u64) -> Result<Transport, TransportBuildError> {
+        Transport::builder_for_chain(chain_id)
+            .ok_or(TransportBuildError::UnknownChain(chain_id))?
+            .build()
     }
 
     /// A prefilled builder over a chain's public defaults, so you can still layer
@@ -211,10 +214,16 @@ impl Transport {
         Some(Transport::builder(rpcs.next()?).fallbacks(rpcs))
     }
 
-    /// A transport at a vendor endpoint built from an API key. `None` if the
-    /// `(vendor, chain)` pair isn't in the curated map (use [`Transport::builder`]).
-    pub fn vendor(vendor: Vendor, api_key: &str, chain_id: u64) -> Option<Transport> {
-        Some(Transport::single(vendor_url(vendor, api_key, chain_id)?))
+    /// A transport at a vendor endpoint built from an API key. `Err(UnknownChain)` if
+    /// the `(vendor, chain)` pair isn't in the curated map (use [`Transport::builder`]).
+    pub fn vendor(
+        vendor: Vendor,
+        api_key: &str,
+        chain_id: u64,
+    ) -> Result<Transport, TransportBuildError> {
+        let url = vendor_url(vendor, api_key, chain_id)
+            .ok_or(TransportBuildError::UnknownChain(chain_id))?;
+        Transport::single(url)
     }
 }
 
@@ -225,7 +234,7 @@ mod tests {
     #[test]
     fn embedded_catalog_has_broad_coverage() {
         assert!(
-            registry().read().unwrap().len() > 100,
+            registry().read().len() > 100,
             "eRPC snapshot covers ~1000 chains"
         );
         for chain in [1, 10, 56, 137, 8453, 42161, 11155111] {
@@ -235,8 +244,11 @@ mod tests {
             );
         }
         assert!(public_rpcs(u64::MAX).is_empty(), "unknown chain has none");
-        assert!(Transport::for_chain(8453).is_some());
-        assert!(Transport::for_chain(u64::MAX).is_none());
+        assert!(Transport::for_chain(8453).is_ok());
+        assert!(matches!(
+            Transport::for_chain(u64::MAX),
+            Err(TransportBuildError::UnknownChain(_))
+        ));
     }
 
     #[test]

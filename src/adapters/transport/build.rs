@@ -30,17 +30,15 @@ impl Transport {
     }
 
     /// A single HTTP endpoint with defaults — the recommended eRPC setup.
-    pub fn single(url: Url) -> Self {
+    pub fn single(url: Url) -> Result<Self, TransportBuildError> {
         TransportBuilder::new(url).build()
     }
 
     /// Build from a declarative config (the first endpoint is primary, the rest
-    /// are fallbacks). Panics if `endpoints` is empty.
-    pub fn from_config(cfg: TransportConfig) -> Self {
+    /// are fallbacks).
+    pub fn from_config(cfg: TransportConfig) -> Result<Self, TransportBuildError> {
         let mut endpoints = cfg.endpoints.into_iter();
-        let primary = endpoints
-            .next()
-            .expect("TransportConfig needs at least one endpoint");
+        let primary = endpoints.next().ok_or(TransportBuildError::NoEndpoints)?;
         let mut b = TransportBuilder::new(primary)
             .retry(cfg.retry_max, cfg.retry_backoff_ms)
             .hedge(cfg.hedge)
@@ -148,12 +146,12 @@ impl TransportBuilder {
         self.header("authorization", &format!("Bearer {token}"))
     }
 
-    pub fn build(self) -> Transport {
+    pub fn build(self) -> Result<Transport, TransportBuildError> {
         let mut client_builder = Client::builder().default_headers(self.headers);
         if let Some(t) = self.timeout {
             client_builder = client_builder.timeout(t);
         }
-        let http_client = client_builder.build().expect("reqwest client");
+        let http_client = client_builder.build()?;
 
         let retry = RetryBackoffLayer::new(self.retry_max, self.retry_backoff_ms, RETRY_CUPS);
         let throttle = ThrottleLayer::new(self.rate_limit_rps.unwrap_or(UNLIMITED_RPS));
@@ -168,7 +166,9 @@ impl TransportBuilder {
                 .chain(self.fallbacks)
                 .map(|u| Http::with_client(http_client.clone(), u))
                 .collect();
-            let active = NonZeroUsize::new(self.hedge.min(transports.len())).unwrap();
+            // hedge >= 1 and transports >= 1, so the min is always >= 1.
+            let active =
+                NonZeroUsize::new(self.hedge.min(transports.len())).unwrap_or(NonZeroUsize::MIN);
             let fallback = FallbackLayer::default()
                 .with_active_transport_count(active)
                 .layer(transports);
@@ -178,10 +178,24 @@ impl TransportBuilder {
                 .transport(fallback, false)
         };
 
-        Transport {
+        Ok(Transport {
             provider: ProviderBuilder::new().connect_client(client).erased(),
-        }
+        })
     }
+}
+
+/// Why building a [`Transport`] failed — a bad config or an unusable HTTP backend,
+/// surfaced instead of panicking during construction.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TransportBuildError {
+    #[error("transport config has no endpoints")]
+    NoEndpoints,
+    /// No public default / vendor endpoint is known for the chain.
+    #[error("no known endpoint for chain {0}")]
+    UnknownChain(u64),
+    #[error("http client build failed: {0}")]
+    HttpClient(#[from] alloy_transport_http::reqwest::Error),
 }
 
 /// Declarative per-chain transport config (deserialize from a config file).
@@ -220,20 +234,29 @@ mod tests {
     // Smoke test: exercise every builder knob + the config path (guards the
     // FallbackLayer/NonZeroUsize/reqwest construction against panics). No network.
     #[test]
-    fn builder_and_config_construct_without_panic() {
-        let _ = Transport::builder("http://localhost:8545".parse().unwrap())
-            .fallback("http://localhost:8546".parse().unwrap())
-            .hedge(2)
-            .retry(3, 100)
-            .timeout(Duration::from_secs(10))
-            .bearer("token")
-            .rate_limit(50)
-            .build();
+    fn builder_and_config_construct_ok() {
+        assert!(
+            Transport::builder("http://localhost:8545".parse().unwrap())
+                .fallback("http://localhost:8546".parse().unwrap())
+                .hedge(2)
+                .retry(3, 100)
+                .timeout(Duration::from_secs(10))
+                .bearer("token")
+                .rate_limit(50)
+                .build()
+                .is_ok()
+        );
 
         let cfg: TransportConfig = serde_json::from_str(
             r#"{"endpoints":["http://localhost:8545","http://localhost:8546"],"hedge":2,"timeout_ms":5000,"bearer":"k"}"#,
         )
         .unwrap();
-        let _ = Transport::from_config(cfg);
+        assert!(Transport::from_config(cfg).is_ok());
+
+        let empty: TransportConfig = serde_json::from_str(r#"{"endpoints":[]}"#).unwrap();
+        assert!(matches!(
+            Transport::from_config(empty),
+            Err(TransportBuildError::NoEndpoints)
+        ));
     }
 }

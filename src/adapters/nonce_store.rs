@@ -28,8 +28,9 @@ use crate::core::deps::{
 use crate::core::wallet::{HandleId, NonceScope, NonceState, TxHandle};
 use alloy_primitives::Address;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// In-memory store: a versioned map of `scope -> nonce state` plus persisted
 /// handles. Non-durable, so recovery is single-run (see the module docs).
@@ -45,13 +46,7 @@ impl StateStore for InMemoryStateStore {
         &self,
         scope: NonceScope,
     ) -> Result<Versioned<NonceState>, StateStoreError> {
-        Ok(self
-            .nonces
-            .lock()
-            .unwrap()
-            .get(&scope)
-            .cloned()
-            .unwrap_or_default())
+        Ok(self.nonces.lock().get(&scope).cloned().unwrap_or_default())
     }
 
     async fn cas_nonce_state(
@@ -60,7 +55,7 @@ impl StateStore for InMemoryStateStore {
         expected_version: u64,
         state: &NonceState,
     ) -> Result<bool, StateStoreError> {
-        let mut nonces = self.nonces.lock().unwrap();
+        let mut nonces = self.nonces.lock();
         let current = nonces.get(&scope).map_or(0, |v| v.version);
         if current != expected_version {
             return Ok(false);
@@ -76,10 +71,7 @@ impl StateStore for InMemoryStateStore {
     }
 
     async fn put_handle(&self, handle: &TxHandle) -> Result<(), StateStoreError> {
-        self.handles
-            .lock()
-            .unwrap()
-            .insert(handle.id, handle.clone());
+        self.handles.lock().insert(handle.id, handle.clone());
         Ok(())
     }
 
@@ -87,7 +79,6 @@ impl StateStore for InMemoryStateStore {
         Ok(self
             .handles
             .lock()
-            .unwrap()
             .values()
             .filter(|h| h.account == account && !h.status.is_terminal())
             .cloned()

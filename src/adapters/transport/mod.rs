@@ -18,7 +18,7 @@
 mod build;
 mod chains;
 
-pub use build::{TransportBuilder, TransportConfig};
+pub use build::{TransportBuildError, TransportBuilder, TransportConfig};
 pub use chains::{Vendor, public_rpcs, refresh_public_endpoints, vendor_url};
 
 use crate::core::deps::{Rpc, RpcError};

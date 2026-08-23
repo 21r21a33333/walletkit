@@ -14,4 +14,4 @@ pub use gas_oracle::RpcGasOracle;
 pub use nonce_store::{InMemoryStateStore, LocalNonceManager};
 pub use public_mempool::PublicMempool;
 pub use signers::LocalSigner;
-pub use transport::{Transport, TransportBuilder, TransportConfig, Vendor};
+pub use transport::{Transport, TransportBuildError, TransportBuilder, TransportConfig, Vendor};

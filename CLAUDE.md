@@ -40,6 +40,19 @@ These rules override default behavior and MUST be followed for every task.
   actually needs it. Don't pre-build. Add deps at their first real consumer.
 - Reuse before hand-rolling: prefer alloy / serde / library primitives over
   bespoke code.
+- **No `unwrap()`/`expect()` in production code** — they panic. Propagate with `?`
+  through the per-port `{TraitName}Error`, or handle explicitly (`unwrap_or`,
+  `unwrap_or_default`, `if let`, `let … else`, `match`). Allowed **only** in
+  `#[cfg(test)]`, `const` contexts, or a **documented genuinely-infallible invariant**
+  where a fallback would be *wrong* (e.g. `serde_json::to_vec` of a plain struct) — the
+  `expect` message must state the invariant. Prefer `parking_lot` locks (no poisoning,
+  no `.lock().unwrap()`).
+- **Prefer `match` and combinators over nested `if/else`.** Model mutually-exclusive
+  cases with `match`; flatten with `if let` / `let … else` / `?` / iterator
+  combinators (`map`, `filter`, `ok_or`, `and_then`). Deep `if/else` ladders and
+  arrow-shaped nesting are a refactor smell — rewrite them.
+- **DRY** — no copy-pasted logic. Extract a shared function/type at the second use
+  (build+sign+encode, CAS loops, error mapping, etc.); keep the API surface small.
 
 ## Tests — every test earns its place
 

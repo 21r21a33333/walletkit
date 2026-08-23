@@ -16,8 +16,9 @@ use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::TransactionReceipt;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Confirmation depth before a mined tx is treated as final. OZ uses 12 for mainnet;
 /// L2s want fewer. Per-chain, tunable via [`AccountExecutor::with_confirmations`].
@@ -120,7 +121,7 @@ impl AccountExecutor {
     ) {
         let last_broadcast_at = self.clock.now_unix();
         let envelope = approval.gas_envelope(); // the immutable per-intent spend ceiling
-        self.tracking.lock().unwrap().insert(
+        self.tracking.lock().insert(
             handle,
             TrackedTx {
                 intent,
@@ -172,7 +173,7 @@ impl AccountExecutor {
             handle.status = status;
             // A terminal handle no longer needs its in-memory bump state.
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
-                self.tracking.lock().unwrap().remove(&handle.id);
+                self.tracking.lock().remove(&handle.id);
             }
         }
         Ok(())
@@ -263,12 +264,12 @@ impl AccountExecutor {
             if handle.nonce < mined || !matches!(handle.status, TxStatus::Sent) {
                 continue;
             }
-            let mut tracked = match self.tracking.lock().unwrap().get(&handle.id).cloned() {
+            let mut tracked = match self.tracking.lock().get(&handle.id).cloned() {
                 Some(t) if now.saturating_sub(t.last_broadcast_at) >= self.bump_timeout => t,
                 _ => continue,
             };
             if self.bump(&mut handle, &mut tracked, now).await.is_ok() {
-                self.tracking.lock().unwrap().insert(handle.id, tracked);
+                self.tracking.lock().insert(handle.id, tracked);
             }
         }
         Ok(())
