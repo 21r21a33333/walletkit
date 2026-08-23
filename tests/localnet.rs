@@ -116,3 +116,45 @@ async fn concurrent_batch_gapless_nonces_and_all_confirm() {
         );
     }
 }
+
+#[tokio::test]
+async fn external_nonce_steal_is_recovered() {
+    let net = localnet!();
+    net.no_auto_mine().await;
+
+    // Our tx grabs nonce 0 and sits in the pool.
+    let handle = net.wallet.send(&net.intent(1)).await.expect("send");
+    assert_eq!(handle.nonce, 0);
+
+    // A higher-fee foreign tx (same key, out of band) at nonce 0 replaces ours in the
+    // pool, then mines — consuming our nonce with a hash that isn't ours.
+    net.steal_nonce(0).await;
+    net.mine(3).await;
+
+    net.wallet.tick().await.expect("tick");
+    let status = net.wallet.status(handle.id).await.expect("status");
+    assert!(
+        matches!(
+            status,
+            Some(TxStatus::Replacing { .. }) | Some(TxStatus::Replaced)
+        ),
+        "expected Replacing/Replaced, got {status:?}"
+    );
+
+    // The allocator reconciled forward; a fresh send takes nonce 1 and confirms.
+    let recovered = net
+        .wallet
+        .send(&net.intent(2))
+        .await
+        .expect("send after steal");
+    assert_eq!(
+        recovered.nonce, 1,
+        "allocator must reconcile past the stolen nonce"
+    );
+    net.mine(3).await;
+    net.wallet.tick().await.expect("tick2");
+    assert!(matches!(
+        net.wallet.status(recovered.id).await.expect("status2"),
+        Some(TxStatus::Confirmed { .. })
+    ));
+}

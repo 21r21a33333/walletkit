@@ -101,4 +101,36 @@ impl Localnet {
             .await
             .expect("anvil_mine");
     }
+
+    /// Stop mining on every tx so submitted txs stay pending in the pool.
+    pub async fn no_auto_mine(&self) {
+        let _: () = self
+            .control
+            .raw_request("evm_setAutomine".into(), (false,))
+            .await
+            .expect("evm_setAutomine");
+    }
+
+    /// Send a foreign tx from the wallet's own account at `nonce` (a same-key,
+    /// out-of-band tx). Its fee clears the RBF threshold over the wallet's pending tx
+    /// (so, with mining off, it replaces it) but stays modest — a huge tip would skew
+    /// anvil's fee history and push the wallet's next estimate past its approval
+    /// envelope. The next mine settles the foreign tx, consuming the nonce.
+    pub async fn steal_nonce(&self, nonce: u64) {
+        use alloy_rpc_types_eth::TransactionRequest;
+        let tx = TransactionRequest {
+            from: Some(self.account),
+            to: Some(TxKind::Call(self.account)),
+            value: Some(U256::from(1u64)),
+            nonce: Some(nonce),
+            max_fee_per_gas: Some(30_000_000_000), // 30 gwei
+            max_priority_fee_per_gas: Some(5_000_000_000), // 5 gwei
+            ..Default::default()
+        };
+        let _ = self
+            .control
+            .send_transaction(tx)
+            .await
+            .expect("foreign tx submit");
+    }
 }
