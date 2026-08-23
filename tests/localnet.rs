@@ -1,30 +1,56 @@
-//! Localnet integration tests — the whole stack (Wallet → pipeline + executor →
-//! adapters) against a real anvil with real transactions. Each test spawns a fresh
-//! node and skips cleanly when anvil isn't installed.
+//! Localnet integration tests — the whole stack (Wallet → pipeline + executor → adapters)
+//! against a real anvil with real transactions, run as a matrix over every storage backend.
+//! Each scenario becomes one `#[tokio::test]` per backend (`single_tx_confirms::in_memory`,
+//! `::redb`, `::postgres`); each spawns a fresh node + store and skips cleanly when anvil or
+//! the backend is absent, so the suite is a no-op without Foundry/Postgres.
 
 mod support;
 
-use support::Localnet;
+use std::future::Future;
+use support::{Backend, Localnet};
 use walletkit::core::wallet::{HandleId, TxStatus};
 
-/// Spawn a localnet (optionally at a given confirmation depth) or skip the test when
-/// anvil isn't on PATH — so the suite is a clean no-op without Foundry.
-macro_rules! localnet {
-    () => {
-        localnet!(@ Localnet::spawn())
-    };
-    ($confirmations:expr) => {
-        localnet!(@ Localnet::spawn_with_confirmations($confirmations))
-    };
-    (@ $spawn:expr) => {
-        match $spawn.await {
-            Some(net) => net,
-            None => {
-                eprintln!("skipping: anvil not found on PATH");
-                return;
+/// One `#[tokio::test]` per (scenario × backend). A scenario is an `async fn(Localnet)`; the
+/// matrix wires a fresh anvil + the backend's store and skips when either is unavailable.
+/// Each scenario pins a distinct funded anvil account so runs over a shared Postgres — where
+/// state is keyed by account — never collide across scenarios.
+macro_rules! localnet_matrix {
+    ($( $scenario:ident { account: $acct:expr, confirmations: $conf:expr } ),+ $(,)?) => {
+        $(
+            mod $scenario {
+                use super::*;
+
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                async fn in_memory() {
+                    run(Backend::InMemory, $acct, $conf, super::$scenario).await;
+                }
+
+                #[cfg(feature = "redb")]
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                async fn redb() {
+                    run(Backend::Redb, $acct, $conf, super::$scenario).await;
+                }
+
+                #[cfg(feature = "postgres")]
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                async fn postgres() {
+                    run(Backend::Postgres, $acct, $conf, super::$scenario).await;
+                }
             }
-        }
+        )+
     };
+}
+
+/// Spawn the backend and run `scenario`, or skip when the backend/anvil is unavailable.
+async fn run<F, Fut>(backend: Backend, account: u32, confirmations: u64, scenario: F)
+where
+    F: FnOnce(Localnet) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    match Localnet::spawn_on(backend, account, confirmations).await {
+        Some(net) => scenario(net).await,
+        None => eprintln!("skipping: {backend:?} or anvil unavailable"),
+    }
 }
 
 fn is_terminal(status: &Option<TxStatus>) -> bool {
@@ -34,8 +60,8 @@ fn is_terminal(status: &Option<TxStatus>) -> bool {
     )
 }
 
-/// Mine + tick up to `rounds` times until `id` reaches a terminal state (I3: a tracked
-/// tx must always settle, never hang). Returns the final status.
+/// Mine + tick up to `rounds` times until `id` settles (I3: a tracked tx always settles,
+/// never hangs). Returns the final status.
 async fn settle(net: &Localnet, id: HandleId, rounds: u32) -> Option<TxStatus> {
     let mut status = net.wallet.status(id).await.expect("status");
     for _ in 0..rounds {
@@ -49,7 +75,6 @@ async fn settle(net: &Localnet, id: HandleId, rounds: u32) -> Option<TxStatus> {
     status
 }
 
-/// Settle `id` and assert it confirmed.
 async fn assert_confirms(net: &Localnet, id: HandleId) {
     let status = settle(net, id, 8).await;
     assert!(
@@ -58,23 +83,19 @@ async fn assert_confirms(net: &Localnet, id: HandleId) {
     );
 }
 
-#[tokio::test]
-async fn single_tx_confirms() {
-    let net = localnet!();
+async fn single_tx_confirms(net: Localnet) {
     let handle = net.wallet.send(&net.intent(1_000)).await.expect("send");
     assert_eq!(handle.status, TxStatus::Sent);
     assert_confirms(&net, handle.id).await;
 }
 
-#[tokio::test]
-async fn overspend_rejects_and_recycles_the_nonce() {
+async fn overspend_rejects_and_recycles_the_nonce(net: Localnet) {
     use alloy_primitives::U256;
     use walletkit::WalletKitError;
 
-    let net = localnet!();
-    // anvil estimates gas without a balance check, so an over-balance transfer is
-    // rejected deterministically at submit (insufficient funds), not at estimate. The
-    // pipeline terminalizes the handle and *recycles* the nonce.
+    // anvil estimates gas without a balance check, so an over-balance transfer is rejected
+    // deterministically at submit (insufficient funds), not at estimate. The pipeline
+    // terminalizes the handle and recycles the nonce.
     let err = net
         .wallet
         .send(&net.intent_wei(U256::MAX))
@@ -85,8 +106,7 @@ async fn overspend_rejects_and_recycles_the_nonce() {
         "expected a deterministic submit reject, got {err:?}"
     );
 
-    // The recycled nonce (0) is reused by the next valid send, which confirms — proving
-    // a rejected tx leaves no nonce gap.
+    // The recycled nonce (0) is reused by the next valid send — proving no nonce gap.
     let handle = net
         .wallet
         .send(&net.intent(1))
@@ -99,13 +119,11 @@ async fn overspend_rejects_and_recycles_the_nonce() {
     assert_confirms(&net, handle.id).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_batch_gapless_nonces_and_all_confirm() {
-    let net = localnet!();
+async fn concurrent_batch_gapless_nonces_and_all_confirm(net: Localnet) {
     let n = 8u64;
 
-    // Fire N sends at once — the CAS nonce allocator must hand out 0..n distinct,
-    // gapless nonces under real concurrent submission.
+    // Fire N sends at once — the CAS allocator must hand out 0..n distinct, gapless nonces
+    // under real concurrent submission.
     let mut tasks = Vec::new();
     for i in 0..n {
         let wallet = net.wallet.clone();
@@ -126,17 +144,14 @@ async fn concurrent_batch_gapless_nonces_and_all_confirm() {
     }
 }
 
-#[tokio::test]
-async fn external_nonce_steal_is_recovered() {
-    let net = localnet!();
+async fn external_nonce_steal_is_recovered(net: Localnet) {
     net.no_auto_mine().await;
 
-    // Our tx grabs nonce 0 and sits in the pool.
     let handle = net.wallet.send(&net.intent(1)).await.expect("send");
     assert_eq!(handle.nonce, 0);
 
-    // A higher-fee foreign tx (same key, out of band) at nonce 0 replaces ours in the
-    // pool, then mines — consuming our nonce with a hash that isn't ours.
+    // A higher-fee foreign tx (same key, out of band) at nonce 0 replaces ours in the pool,
+    // then mines — consuming our nonce with a hash that isn't ours.
     net.steal_nonce(0).await;
     net.mine(3).await;
 
@@ -163,9 +178,7 @@ async fn external_nonce_steal_is_recovered() {
     assert_confirms(&net, recovered.id).await;
 }
 
-#[tokio::test]
-async fn stuck_tx_is_bumped_then_confirms() {
-    let net = localnet!();
+async fn stuck_tx_is_bumped_then_confirms(net: Localnet) {
     net.no_auto_mine().await;
 
     // Low-fee send sits pending (mining off).
@@ -178,8 +191,8 @@ async fn stuck_tx_is_bumped_then_confirms() {
         .expect("present");
     assert_eq!(sent.broadcasts.len(), 1);
 
-    // A tick escalates the stuck tx (bump_timeout 0) -> same-nonce RBF -> a 2nd
-    // broadcast, which anvil accepts as a replacement.
+    // A tick escalates the stuck tx (bump_timeout 0) -> same-nonce RBF -> a 2nd broadcast,
+    // which anvil accepts as a replacement.
     net.wallet.tick().await.expect("tick-bump");
     let bumped = net
         .wallet
@@ -196,12 +209,8 @@ async fn stuck_tx_is_bumped_then_confirms() {
     assert_confirms(&net, handle.id).await;
 }
 
-#[tokio::test]
-async fn reorg_unmines_without_false_confirm_then_recovers() {
-    // Depth 3 keeps the mined tx tentative (not terminal) so the reorg can act on it.
-    let net = localnet!(3);
-
-    // Mine our tx; it's tentatively Mined (depth 3 not yet met).
+async fn reorg_unmines_without_false_confirm_then_recovers(net: Localnet) {
+    // Depth 3 (set by the matrix) keeps the mined tx tentative so the reorg can act on it.
     let handle = net.wallet.send(&net.intent(1)).await.expect("send");
     net.wallet.tick().await.expect("tick-mine");
     assert!(
@@ -223,21 +232,17 @@ async fn reorg_unmines_without_false_confirm_then_recovers() {
         "a reorg must never produce a false terminal, got {after:?}"
     );
 
-    // Recovery: rebroadcast + re-mine + confirm (settle is robust to the un-mine landing
-    // as Sent or being held tentative on a stale read).
+    // Recovery: rebroadcast + re-mine + confirm.
     assert_confirms(&net, handle.id).await;
 }
 
-#[tokio::test]
-async fn restart_reconciles_a_tx_mined_during_downtime() {
-    let net = localnet!();
-
+async fn restart_reconciles_a_tx_mined_during_downtime(net: Localnet) {
     // Send, then the tx mines while the original wallet never ticks ("downtime").
     let handle = net.wallet.send(&net.intent(1)).await.expect("send");
     net.mine(3).await;
 
-    // Restart: a fresh wallet over the SAME store recovers and confirms it from the
-    // persisted handle in a single tick — no rebroadcast needed since it already mined.
+    // Restart: a fresh wallet over the same store reconciles from the persisted handle in one
+    // tick — no rebroadcast needed since it already mined.
     let restarted = net.rebuild_wallet();
     restarted.tick().await.expect("tick after restart");
     assert!(
@@ -249,13 +254,22 @@ async fn restart_reconciles_a_tx_mined_during_downtime() {
     );
 }
 
-#[tokio::test]
-async fn every_tx_settles_within_bounded_ticks() {
-    let net = localnet!();
+async fn every_tx_settles_within_bounded_ticks(net: Localnet) {
     let handle = net.wallet.send(&net.intent(1)).await.expect("send");
     let status = settle(&net, handle.id, 10).await;
     assert!(
         matches!(status, Some(TxStatus::Confirmed { .. })),
         "tx must settle to a terminal state within 10 rounds, got {status:?}"
     );
+}
+
+localnet_matrix! {
+    single_tx_confirms                              { account: 1, confirmations: 1 },
+    overspend_rejects_and_recycles_the_nonce        { account: 2, confirmations: 1 },
+    concurrent_batch_gapless_nonces_and_all_confirm { account: 3, confirmations: 1 },
+    external_nonce_steal_is_recovered               { account: 4, confirmations: 1 },
+    stuck_tx_is_bumped_then_confirms                { account: 5, confirmations: 1 },
+    reorg_unmines_without_false_confirm_then_recovers { account: 6, confirmations: 3 },
+    restart_reconciles_a_tx_mined_during_downtime   { account: 7, confirmations: 1 },
+    every_tx_settles_within_bounded_ticks           { account: 8, confirmations: 1 },
 }
