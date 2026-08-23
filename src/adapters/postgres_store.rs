@@ -1,8 +1,8 @@
 //! Networked/shared `StateStore` over PostgreSQL via sqlx (pure-Rust driver). Suitable for
 //! multiple replicas sharing per-account state: the version-CAS gives cross-replica gapless
-//! nonces, and the fence rejects a superseded owner (the Phase-3 lease issuer mints real
-//! tokens). Values are stored as `JSONB` (same `serde_json` shape as the redb backend);
-//! version/fence/nonce are `BIGINT` columns so they can be inspected and indexed in SQL.
+//! nonces, and the fence rejects a superseded owner (a distributed lease issuer mints real
+//! tokens later). Values are stored as `JSONB` (same `serde_json` shape as the redb
+//! backend); version/fence are `BIGINT` columns so they can be inspected and indexed in SQL.
 
 use crate::core::deps::{StateStore, StateStoreError, Versioned};
 use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};

@@ -18,7 +18,9 @@
 
 use super::wasm::WasmPlugin;
 use crate::core::deps::{PolicyEngine, PolicyEngineError};
-use crate::core::wallet::{Decision, GasEnvelope, PolicyApproval, PolicyRejection, TxIntent};
+use crate::core::wallet::{
+    Decision, GasEnvelope, PolicyApproval, PolicyRejection, SigningRequest, TxIntent,
+};
 use alloy_primitives::TxKind;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -105,7 +107,15 @@ impl MoonPayPolicyEngine {
 
 #[async_trait]
 impl PolicyEngine for MoonPayPolicyEngine {
-    async fn evaluate(&self, intent: &TxIntent) -> Result<Decision, PolicyEngineError> {
+    async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError> {
+        // This engine evaluates transactions only; other payloads are default-denied.
+        let SigningRequest::Transaction(intent) = request else {
+            return Ok(deny(
+                "unsupported-payload",
+                None,
+                "this engine evaluates transactions only".into(),
+            ));
+        };
         let now = (self.now_unix)();
 
         // Declarative rules first; a violation denies before the executable runs.
@@ -238,6 +248,10 @@ mod tests {
         }
     }
 
+    fn tx(chain_id: u64, to: Address) -> SigningRequest {
+        SigningRequest::Transaction(intent(chain_id, to))
+    }
+
     fn doc(rules: serde_json::Value) -> serde_json::Value {
         json!({ "id": "p", "name": "n", "version": 1, "created_at": "2026-01-01T00:00:00Z", "rules": rules, "action": "deny" })
     }
@@ -259,10 +273,10 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            engine.evaluate(&intent(8453, to())).await.unwrap(),
+            engine.evaluate(&tx(8453, to())).await.unwrap(),
             Decision::Allow(_)
         ));
-        match engine.evaluate(&intent(1, to())).await.unwrap() {
+        match engine.evaluate(&tx(1, to())).await.unwrap() {
             Decision::Deny(r) => assert_eq!(r.rule, "allowed_chains"),
             d => panic!("expected allowed_chains deny, got {d:?}"),
         }
@@ -283,12 +297,12 @@ mod tests {
         .unwrap()
         .with_now(|| NOW_2026);
 
-        match expired.evaluate(&intent(1, to())).await.unwrap() {
+        match expired.evaluate(&tx(1, to())).await.unwrap() {
             Decision::Deny(r) => assert_eq!(r.rule, "expires_at"),
             d => panic!("expected expiry deny, got {d:?}"),
         }
         assert!(matches!(
-            valid.evaluate(&intent(1, to())).await.unwrap(),
+            valid.evaluate(&tx(1, to())).await.unwrap(),
             Decision::Allow(_)
         ));
     }
@@ -299,10 +313,10 @@ mod tests {
         let deny = with_exec(json!([]), &writer_wat(r#"{"allow":false}"#));
 
         assert!(matches!(
-            allow.evaluate(&intent(1, to())).await.unwrap(),
+            allow.evaluate(&tx(1, to())).await.unwrap(),
             Decision::Allow(_)
         ));
-        match deny.evaluate(&intent(1, to())).await.unwrap() {
+        match deny.evaluate(&tx(1, to())).await.unwrap() {
             Decision::Deny(r) => assert_eq!(r.rule, "executable"),
             d => panic!("expected executable deny, got {d:?}"),
         }
@@ -315,7 +329,7 @@ mod tests {
             json!([{ "type": "allowed_chains", "chain_ids": ["eip155:8453"] }]),
             &writer_wat(r#"{"allow":true}"#),
         );
-        match engine.evaluate(&intent(1, to())).await.unwrap() {
+        match engine.evaluate(&tx(1, to())).await.unwrap() {
             Decision::Deny(r) => assert_eq!(r.rule, "allowed_chains"),
             d => panic!("expected allowed_chains deny, got {d:?}"),
         }
@@ -325,7 +339,7 @@ mod tests {
     async fn executable_trap_is_fail_closed() {
         let engine = with_exec(json!([]), TRAP_WAT);
         assert!(matches!(
-            engine.evaluate(&intent(1, to())).await,
+            engine.evaluate(&tx(1, to())).await,
             Err(PolicyEngineError::Eval(_))
         ));
     }
@@ -334,7 +348,7 @@ mod tests {
     async fn runaway_executable_is_fuel_trapped() {
         let engine = with_exec(json!([]), LOOP_WAT);
         assert!(matches!(
-            engine.evaluate(&intent(1, to())).await,
+            engine.evaluate(&tx(1, to())).await,
             Err(PolicyEngineError::Eval(_))
         ));
     }

@@ -1,5 +1,5 @@
 //! Concrete implementations of the [`core::deps`](crate::core::deps) ports.
-//! One (flat) module per adapter, added as each task lands.
+//! One (flat) module per adapter.
 
 pub mod clock;
 pub mod gas_oracle;

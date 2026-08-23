@@ -2,8 +2,7 @@ use crate::core::deps::RpcError;
 use alloy_primitives::{Bytes, TxHash};
 use async_trait::async_trait;
 
-/// Broadcasts a signed, RLP-encoded transaction and returns its hash. Phase 1 is
-/// public-mempool only.
+/// Broadcasts a signed, RLP-encoded transaction and returns its hash.
 #[async_trait]
 pub trait SubmissionStrategy: Send + Sync {
     async fn submit(&self, signed_rlp: Bytes) -> Result<TxHash, SubmissionError>;

@@ -13,6 +13,8 @@ publish = false
 
 [dependencies]
 alloy-consensus = "2.4.1"
+# EIP-712 `TypedData`/`Eip712Domain` for the signing surface; reuse alloy's encoder.
+alloy-dyn-abi = { version = "1", features = ["eip712"] }
 alloy-eips = "2.4.1"
 # Deps are added per-consumer (see docs/plans): thiserror/tokio/async-trait/tracing
 # arrive with the ports and adapters that first use them, not up front.

@@ -12,6 +12,7 @@ pub use executor::{
 };
 pub use primitives::{
     Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState,
-    PolicyApproval, PolicyRejection, TxHandle, TxIntent, TxStatus,
+    PolicyApproval, PolicyRejection, SignatureEnvelope, SigningError, SigningRequest,
+    SigningScheme, TxHandle, TxIntent, TxStatus, enforce_low_s, typed_data_hash,
 };
 pub use transaction_manager::{TransactionManager, TransactionManagerError};

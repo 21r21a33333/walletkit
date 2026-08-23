@@ -138,4 +138,40 @@ mod redaction_tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn signing_a_message_records_only_the_payload_hash() {
+        let signer = LocalSigner::from_mnemonic(
+            "test test test test test test test test test test test junk",
+            0,
+        )
+        .expect("signer");
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // The Harness's default policy allows; a real signer holds KEY_HEX.
+        let manager = crate::testutils::Harness::default()
+            .signer(Arc::new(signer))
+            .manager();
+        let secret = b"authorize withdrawal to 0xattacker";
+        manager.sign_message(secret).await.expect("sign");
+
+        const KEY_HEX: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        let recorded = capture.0.lock().clone();
+        assert!(!recorded.is_empty(), "capture observed no sign telemetry");
+        for entry in &recorded {
+            assert!(
+                !entry.to_lowercase().contains(KEY_HEX),
+                "key leaked: {entry}"
+            );
+            assert!(
+                !entry.contains("authorize withdrawal"),
+                "message content leaked: {entry}"
+            );
+            let name = entry.split('=').next().unwrap_or("");
+            assert!(matches!(name, "payload_hash"), "unexpected field: {entry}");
+        }
+    }
 }
