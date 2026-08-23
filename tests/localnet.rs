@@ -5,7 +5,7 @@
 mod support;
 
 use support::Localnet;
-use walletkit::core::wallet::TxStatus;
+use walletkit::core::wallet::{HandleId, TxStatus};
 
 /// Spawn a localnet or skip the test if anvil isn't on PATH.
 macro_rules! localnet {
@@ -272,5 +272,38 @@ async fn restart_reconciles_a_tx_mined_during_downtime() {
             Some(TxStatus::Confirmed { .. })
         ),
         "restarted wallet should reconcile the mined tx to Confirmed"
+    );
+}
+
+fn is_terminal(status: &Option<TxStatus>) -> bool {
+    matches!(
+        status,
+        Some(TxStatus::Confirmed { .. }) | Some(TxStatus::Failed { .. }) | Some(TxStatus::Replaced)
+    )
+}
+
+/// Mine + tick up to `rounds` times until `id` reaches a terminal state (I3: a tracked
+/// tx must always settle, never hang). Returns the final status.
+async fn settle(net: &Localnet, id: HandleId, rounds: u32) -> Option<TxStatus> {
+    let mut status = net.wallet.status(id).await.expect("status");
+    for _ in 0..rounds {
+        if is_terminal(&status) {
+            break;
+        }
+        net.mine(2).await;
+        net.wallet.tick().await.expect("tick");
+        status = net.wallet.status(id).await.expect("status");
+    }
+    status
+}
+
+#[tokio::test]
+async fn every_tx_settles_within_bounded_ticks() {
+    let net = localnet!();
+    let handle = net.wallet.send(&net.intent(1)).await.expect("send");
+    let status = settle(&net, handle.id, 10).await;
+    assert!(
+        matches!(status, Some(TxStatus::Confirmed { .. })),
+        "tx must settle to a terminal state within 10 rounds, got {status:?}"
     );
 }
