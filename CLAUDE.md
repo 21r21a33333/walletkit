@@ -54,6 +54,30 @@ These rules override default behavior and MUST be followed for every task.
 - **DRY** — no copy-pasted logic. Extract a shared function/type at the second use
   (build+sign+encode, CAS loops, error mapping, etc.); keep the API surface small.
 
+## Observability & error handling (standards set in the errors+observability phase)
+
+New code MUST follow these; they are not optional.
+
+- **One public error type.** Every fallible public API returns `WalletKitError`; per-port
+  `{Trait}Error`s stay the internal contracts and map in via `From`. A new failure mode
+  must (a) surface as a `WalletKitError` variant and (b) be classified in `kind()`
+  (`Retryable` / `Terminal` / `NeedsReconcile`); add a `remediation()` hint when it helps.
+  Never return `Result<_, String>` or leak a raw port error across the public boundary.
+- **Instrument via the shim, never `tracing::` directly.** Import once per module
+  (`use crate::obs::{info, warn, error, debug};`) and call bare (`warn!(...)`); use
+  `#[cfg_attr(feature = "tracing", tracing::instrument(...))]` for spans. Never install a
+  subscriber, call `set_global_default`, or depend on `opentelemetry` in the crate — the
+  host owns that. Builds must stay green **with and without** `--no-default-features`.
+- **Correlate by intent hash.** Open or inherit a per-intent span carrying `intent_hash`;
+  set a fact on the span once, not on every child event.
+- **Levels:** ERROR = terminal caller-facing failure · WARN = recoverable/degraded (bump,
+  reorg, replaced, failover, retry) · INFO = sparse milestones (~1/tx: submitted, confirmed)
+  · DEBUG = mechanics · TRACE = FSM/raw. Keep INFO sparse — no per-poll INFO.
+- **Redaction is mandatory on key paths.** Any fn touching a key, `PolicyApproval`, a tx to
+  sign, or signed bytes is `#[instrument(skip_all, fields(<safe allow-list>))]` — allow-list,
+  never deny-list. No secret ever becomes a span/event field; secret-bearing types get a
+  redacting `Debug`. Keep the redaction test in `signing.rs` green.
+
 ## Tests — every test earns its place
 
 - **No tests** for config parsing, serde derives, struct init, route
@@ -69,6 +93,9 @@ These rules override default behavior and MUST be followed for every task.
 - [ ] YAGNI: no unused types/fields/deps introduced.
 - [ ] Comments are why-not-what; naming matches house style.
 - [ ] Only regression-worthy tests added.
+- [ ] Public failures return `WalletKitError` (classified via `kind()`); new
+      orchestration/adapter code instrumented via `crate::obs`/`instrument`, `skip_all` on
+      key paths, no secrets in telemetry; green with and without `--no-default-features`.
 - [ ] `cargo fmt --check` + `cargo clippy --all-targets` + `cargo test` run, real
       output reported.
 - [ ] Left uncommitted; await review; commit only on approval.
