@@ -243,4 +243,59 @@ mod tests {
         let store = RedbStateStore::open(&path).unwrap();
         assert_eq!(store.load_nonce_state(scope).await.unwrap().value.next, 9);
     }
+
+    // The end-to-end durability contract: an in-flight tx persisted by one wallet is
+    // recovered and confirmed by a *fresh* wallet reopened over the same redb file — the
+    // real crash-restart path (`redb_persists_across_reopen` only covers nonce state).
+    #[tokio::test]
+    async fn wallet_recovers_an_inflight_tx_after_restart_over_redb() {
+        use crate::Wallet;
+        use crate::core::wallet::TxStatus;
+        use crate::testutils::{MockPolicy, MockRpc, MockSigner, intent, receipt};
+        use alloy_primitives::B256;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wk.redb");
+        let mined = B256::repeat_byte(1);
+        // A chain view where the sent nonce is mined at block 8, anchored to `mined`, and
+        // the head is deep past it — so one tick confirms at `confirmations(2)`.
+        let rpc = || {
+            Arc::new(MockRpc {
+                tx_count: 1,
+                block_number: 20,
+                receipt: Some(receipt(true, 8, mined)),
+                canonical: Some(mined),
+                ..Default::default()
+            })
+        };
+        let build = |store: Arc<RedbStateStore>| {
+            Wallet::builder(
+                rpc(),
+                Arc::new(MockSigner::default()),
+                Arc::new(MockPolicy::default()),
+            )
+            .confirmations(2)
+            .store(store)
+            .build()
+        };
+
+        // First instance: send, persisting a non-terminal handle to the redb file.
+        let store1 = Arc::new(RedbStateStore::open(&path).unwrap());
+        let id = {
+            let w = build(store1);
+            w.send(&intent()).await.expect("send").id
+        }; // drop w (and its Arc<store>) => close the db
+
+        // Restart: a fresh wallet over the SAME path recovers + confirms in one tick.
+        let store2 = Arc::new(RedbStateStore::open(&path).unwrap());
+        let w = build(store2);
+        w.tick().await.expect("tick");
+        assert!(
+            matches!(
+                w.status(id).await.expect("status"),
+                Some(TxStatus::Confirmed { .. })
+            ),
+            "restarted wallet must reconcile the redb-persisted tx to Confirmed"
+        );
+    }
 }
