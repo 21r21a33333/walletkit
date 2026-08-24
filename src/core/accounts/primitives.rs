@@ -2,7 +2,8 @@
 //! records, and watch-only extended public keys. Zero I/O. `AccountError` grows one variant
 //! per consumer as the slice fills in.
 
-use alloy_primitives::Address;
+use crate::core::deps::ReadClient;
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_signer::utils::public_key_to_address;
 use coins_bip32::prelude::Parent;
 use coins_bip32::xkeys::XPub;
@@ -104,6 +105,93 @@ pub fn derive_address(xpub: &AccountXpub, index: u32) -> Result<Address, Account
     Ok(public_key_to_address(child.as_ref()))
 }
 
+/// The ERC-4337 EntryPoint version a factory targets. Governs how deploy data is expressed:
+/// a single packed `initCode` (v0.6) or split `factory` + `factoryData` (v0.7).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPointVersion {
+    V0_6,
+    V0_7,
+}
+
+/// Deploy data for a counterfactual smart account: exactly what a later ERC-4337 deploy and
+/// an EIP-6492 signature wrapper need. Canonical form is the v0.7 split; the v0.6 `initCode`
+/// view is `factory ++ factory_data`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployData {
+    pub factory: Address,
+    pub factory_data: Bytes,
+    pub entry_point_version: EntryPointVersion,
+}
+
+impl DeployData {
+    /// The v0.6 packed `initCode = factory (20 bytes) ++ factory_data`.
+    pub fn init_code(&self) -> Bytes {
+        let mut v = self.factory.to_vec();
+        v.extend_from_slice(&self.factory_data);
+        v.into()
+    }
+}
+
+/// A predicted counterfactual smart-account address plus the data needed to use it before it
+/// exists on-chain. `#[non_exhaustive]`/`Option` fields leave room for later ERC-4337/6492
+/// work without a breaking change.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredictedAccount {
+    /// The CREATE2 address — valid whether or not code exists there yet.
+    pub address: Address,
+    pub salt: B256,
+    pub deploy: Option<DeployData>,
+    /// `None` = not checked (pure computation); `Some` only from `predict_address_checked`.
+    pub is_deployed: Option<bool>,
+}
+
+/// Inputs to a CREATE2 prediction. The caller supplies the factory, the (post-scheme) salt,
+/// and the init-code hash; `deploy` optionally carries the factory/factoryData to thread
+/// through to a later deploy or 6492 wrapper.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct PredictParams {
+    pub factory: Address,
+    pub salt: B256,
+    pub init_code_hash: B256,
+    pub deploy: Option<DeployData>,
+}
+
+/// Predict a smart account's counterfactual CREATE2 address:
+/// `keccak256(0xff ‖ factory ‖ salt ‖ init_code_hash)[12:]`. Pure — no network. Reuses
+/// alloy's `Address::create2`; never assemble the preimage by hand.
+pub fn predict_address(params: &PredictParams) -> PredictedAccount {
+    PredictedAccount {
+        address: params.factory.create2(params.salt, params.init_code_hash),
+        salt: params.salt,
+        deploy: params.deploy.clone(),
+        is_deployed: None,
+    }
+}
+
+/// As [`predict_address`], plus an on-chain code check via the read port (sets `is_deployed`).
+pub async fn predict_address_checked(
+    read: &dyn ReadClient,
+    params: &PredictParams,
+) -> Result<PredictedAccount, AccountError> {
+    let mut acct = predict_address(params);
+    acct.is_deployed = Some(read.is_contract(acct.address).await?);
+    Ok(acct)
+}
+
+/// Safe's CREATE2 salt: `keccak256(keccak256(initializer) ‖ saltNonce)` — **double-hashed**.
+/// Getting this wrong (single-hashing) yields a plausible-but-wrong address; the caller pairs
+/// it with the proxy `init_code_hash` for [`predict_address`].
+pub fn safe_salt(initializer: &[u8], salt_nonce: U256) -> B256 {
+    let mut buf = Vec::with_capacity(64);
+    buf.extend_from_slice(keccak256(initializer).as_slice());
+    buf.extend_from_slice(&salt_nonce.to_be_bytes::<32>());
+    keccak256(buf)
+}
+
 /// Account-management failures. `#[non_exhaustive]` and grown per consumer; the public
 /// boundary maps this into `WalletKitError`. An error never carries seed material.
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +206,9 @@ pub enum AccountError {
     Derivation(String),
     #[error("secure RNG unavailable: {0}")]
     Rng(String),
+    /// A read failed during an on-chain check (e.g. `predict_address_checked`).
+    #[error(transparent)]
+    Read(#[from] crate::core::deps::ReadError),
 }
 
 #[cfg(test)]
@@ -161,5 +252,53 @@ mod tests {
             PathScheme::Custom("m/44'/60'/0'/0/0".into()).path_for(1),
             Err(AccountError::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn create2_matches_eip1014_vector() {
+        // EIP-1014 Example 0: deployer 0x00.., salt 0x00.., init_code 0x00.
+        // Address verified with `cast keccak` (note the EIP-55 checksum casing).
+        let p = PredictParams {
+            factory: Address::ZERO,
+            salt: B256::ZERO,
+            init_code_hash: keccak256([0x00]),
+            deploy: None,
+        };
+        let out = predict_address(&p);
+        assert_eq!(
+            out.address,
+            alloy_primitives::address!("0x4D1A2e2bB4F88F0250f26Ffff098B0b30B26BF38")
+        );
+        assert_eq!(out.is_deployed, None); // pure compute leaves it unchecked
+        assert_eq!(out.salt, B256::ZERO);
+    }
+
+    #[test]
+    fn safe_salt_is_double_hashed_not_single() {
+        let initializer = alloy_primitives::bytes!("0xdeadbeef");
+        let nonce = U256::from(1u64);
+        let expected = {
+            let mut b = Vec::new();
+            b.extend_from_slice(keccak256(&initializer).as_slice());
+            b.extend_from_slice(&nonce.to_be_bytes::<32>());
+            keccak256(b)
+        };
+        assert_eq!(safe_salt(&initializer, nonce), expected);
+        // Must NOT equal the single-hash form — the classic Safe address bug.
+        let single = keccak256([&initializer[..], &nonce.to_be_bytes::<32>()[..]].concat());
+        assert_ne!(safe_salt(&initializer, nonce), single);
+    }
+
+    #[test]
+    fn deploy_data_init_code_is_factory_then_data() {
+        let d = DeployData {
+            factory: alloy_primitives::address!("0x1111111111111111111111111111111111111111"),
+            factory_data: alloy_primitives::bytes!("0xabcd"),
+            entry_point_version: EntryPointVersion::V0_6,
+        };
+        assert_eq!(
+            d.init_code(),
+            alloy_primitives::bytes!("0x1111111111111111111111111111111111111111abcd")
+        );
     }
 }
