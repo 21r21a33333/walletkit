@@ -1,6 +1,7 @@
 //! Concrete implementations of the [`core::deps`](crate::core::deps) ports. One module per
 //! adapter; multi-file adapters ([`policy`], [`store`], [`transport`]) get a subdirectory.
 
+pub mod accounts;
 pub mod clock;
 pub mod ens;
 pub mod gas_oracle;
@@ -17,6 +18,7 @@ pub mod transport;
 /// Shared Multicall3 batching primitive used by the read adapter (and, later, preview).
 pub(crate) mod multicall;
 
+pub use accounts::AccountManager;
 pub use clock::SystemClock;
 pub use ens::RpcEnsResolver;
 pub use gas_oracle::RpcGasOracle;

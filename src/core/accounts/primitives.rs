@@ -85,6 +85,13 @@ pub struct Account {
 pub enum AccountError {
     #[error("invalid derivation path: {0}")]
     InvalidPath(String),
+    /// A phrase failed BIP-39 validation (checksum/word count). Never carries the phrase.
+    #[error("invalid mnemonic phrase")]
+    InvalidPhrase,
+    #[error("key derivation failed: {0}")]
+    Derivation(String),
+    #[error("secure RNG unavailable: {0}")]
+    Rng(String),
 }
 
 #[cfg(test)]

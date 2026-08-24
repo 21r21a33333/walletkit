@@ -55,6 +55,26 @@ impl LocalSigner {
         Ok(Self { inner })
     }
 
+    /// Derive from a BIP-39 mnemonic at an explicit derivation path, with an optional
+    /// passphrase (the BIP-39 "25th word"). The private key is materialized only inside
+    /// alloy's `PrivateKeySigner`, so the no-export invariant holds.
+    pub fn from_mnemonic_path(
+        phrase: &str,
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<Self, SignerError> {
+        let mut builder = MnemonicBuilder::<English>::default()
+            .phrase(phrase)
+            .derivation_path(path)
+            .map_err(load)?;
+        if let Some(pw) = password {
+            builder = builder.password(pw);
+        }
+        Ok(Self {
+            inner: builder.build().map_err(load)?,
+        })
+    }
+
     /// The structural gate shared by every signing method: the approval must bind this
     /// payload and not be expired. (A tx additionally checks the fee envelope.)
     fn gate(
