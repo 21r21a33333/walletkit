@@ -7,7 +7,7 @@
 
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
-    PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
+    PolicyEngineError, Rpc, RpcError, Signer, SignerError, Simulated, StateStore, StateStoreError,
     SubmissionError, SubmissionStrategy, Versioned,
 };
 use crate::core::wallet::{
@@ -22,7 +22,7 @@ use alloy_dyn_abi::TypedData;
 use alloy_eips::Encodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, U256};
-use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
+use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -435,6 +435,15 @@ impl Rpc for MockRpc {
         } else {
             Ok(21_000)
         }
+    }
+    async fn call(&self, _: &TransactionRequest) -> Result<Simulated, RpcError> {
+        Ok(Simulated::Returned(Bytes::new()))
+    }
+    async fn create_access_list(
+        &self,
+        _: &TransactionRequest,
+    ) -> Result<AccessListResult, RpcError> {
+        Ok(AccessListResult::default())
     }
     async fn send_raw(&self, _: Bytes) -> Result<TxHash, RpcError> {
         Ok(TxHash::ZERO)

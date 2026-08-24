@@ -21,12 +21,12 @@ mod chains;
 pub use build::{TransportBuildError, TransportBuilder, TransportConfig};
 pub use chains::{Vendor, public_rpcs, refresh_public_endpoints, vendor_url};
 
-use crate::core::deps::{Rpc, RpcError};
+use crate::core::deps::{Rpc, RpcError, Simulated};
 use alloy_eips::BlockId;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, TxHash};
 use alloy_provider::{DynProvider, Provider};
-use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
+use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
 use alloy_transport::{RpcError as AlloyRpcError, TransportError};
 use async_trait::async_trait;
 
@@ -105,6 +105,28 @@ impl Rpc for Transport {
     async fn estimate_gas(&self, request: &TransactionRequest) -> Result<u64, RpcError> {
         self.provider
             .estimate_gas(request.clone())
+            .await
+            .map_err(rpc_err)
+    }
+
+    async fn call(&self, request: &TransactionRequest) -> Result<Simulated, RpcError> {
+        match self.provider.call(request.clone()).await {
+            Ok(data) => Ok(Simulated::Returned(data)),
+            // A contract revert carries its data on the JSON-RPC error; surface that as a
+            // successful simulation. Anything without revert data is a real transport error.
+            Err(e) => match e.as_error_resp().and_then(|resp| resp.as_revert_data()) {
+                Some(revert) => Ok(Simulated::Reverted(revert)),
+                None => Err(rpc_err(e)),
+            },
+        }
+    }
+
+    async fn create_access_list(
+        &self,
+        request: &TransactionRequest,
+    ) -> Result<AccessListResult, RpcError> {
+        self.provider
+            .create_access_list(request)
             .await
             .map_err(rpc_err)
     }

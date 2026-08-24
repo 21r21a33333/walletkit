@@ -1,7 +1,17 @@
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, TxHash};
-use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
+use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
+
+/// The result of an `eth_call` simulation. A contract **revert is a normal outcome** here
+/// (it carries the revert data for the caller to decode), not an error — only a transport
+/// or node failure is an `Err`.
+pub enum Simulated {
+    /// The call succeeded, returning this output data.
+    Returned(Bytes),
+    /// The call reverted with this raw revert data.
+    Reverted(Bytes),
+}
 
 /// Object-safe read/submit facade over an alloy `Provider`: exactly the chain ops
 /// the nonce/gas/submission adapters need. alloy's generic `Provider`/`Filler`
@@ -29,6 +39,15 @@ pub trait Rpc: Send + Sync {
     /// `eth_estimateGas` — minimal sufficient gas (no end buffer; callers add drift).
     /// Executes the tx, so a deterministic `Err` also means it would revert.
     async fn estimate_gas(&self, request: &TransactionRequest) -> Result<u64, RpcError>;
+    /// `eth_call` at latest: the call's output, or its revert data (a revert is not an
+    /// `Err`). Only a transport/node failure surfaces as `Err`.
+    async fn call(&self, request: &TransactionRequest) -> Result<Simulated, RpcError>;
+    /// `eth_createAccessList`: the EIP-2930 access list plus the addresses/slots the call
+    /// touches (and its estimated gas).
+    async fn create_access_list(
+        &self,
+        request: &TransactionRequest,
+    ) -> Result<AccessListResult, RpcError>;
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError>;
     async fn receipt(&self, tx: TxHash) -> Result<Option<TransactionReceipt>, RpcError>;
 }

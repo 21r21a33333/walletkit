@@ -18,7 +18,7 @@ pub use gas_oracle::{GasOracle, GasOracleError};
 pub use nonce_manager::{NonceManager, NonceManagerError};
 pub use policy_engine::{PolicyEngine, PolicyEngineError};
 pub use read::{AccountBalances, Erc20Metadata, ReadClient, ReadError, TokenBalance};
-pub use rpc::{Rpc, RpcError};
+pub use rpc::{Rpc, RpcError, Simulated};
 pub use signer::{Signer, SignerError};
 pub use state_store::{StateStore, StateStoreError, Versioned};
 pub use submission::{SubmissionError, SubmissionStrategy};
