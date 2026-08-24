@@ -1,7 +1,11 @@
-//! Pure account-management domain types: HD path schemes, word counts, and derived-account
-//! records. Zero I/O. `AccountError` grows one variant per consumer as the slice fills in.
+//! Pure account-management domain types: HD path schemes, word counts, derived-account
+//! records, and watch-only extended public keys. Zero I/O. `AccountError` grows one variant
+//! per consumer as the slice fills in.
 
 use alloy_primitives::Address;
+use alloy_signer::utils::public_key_to_address;
+use coins_bip32::prelude::Parent;
+use coins_bip32::xkeys::XPub;
 
 /// Which BIP-44 slot the `index` shortcut varies. The two standard schemes agree only at
 /// index 0 and produce entirely different address sets otherwise — a notorious interop footgun,
@@ -76,6 +80,28 @@ pub struct Account {
     pub path: String,
     pub address: Address,
     pub label: Option<String>,
+}
+
+/// An account-level BIP-32 extended public key: derive receive addresses without the seed
+/// (the watch-only seam). Neutered at the hardened account node `m/44'/60'/{account}'`, so
+/// its non-hardened `0/{index}` tail is derivable from the public key alone.
+pub struct AccountXpub(pub(crate) XPub);
+
+// An xpub is public but fingerprintable; keep it out of logs by default.
+impl std::fmt::Debug for AccountXpub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AccountXpub(..)")
+    }
+}
+
+/// Derive the receive address at `0/{index}` under an account xpub (the BIP-44 standard
+/// change/index tail). Keyless and pure — no seed, no I/O.
+pub fn derive_address(xpub: &AccountXpub, index: u32) -> Result<Address, AccountError> {
+    let child = xpub
+        .0
+        .derive_path([0u32, index].as_slice())
+        .map_err(|e| AccountError::Derivation(e.to_string()))?;
+    Ok(public_key_to_address(child.as_ref()))
 }
 
 /// Account-management failures. `#[non_exhaustive]` and grown per consumer; the public

@@ -4,7 +4,7 @@
 //! signature-only invariant holds; this type only *constructs* signers.
 
 use crate::adapters::LocalSigner;
-use crate::core::accounts::{Account, AccountError, PathScheme, WordCount};
+use crate::core::accounts::{Account, AccountError, AccountXpub, PathScheme, WordCount};
 use alloy_primitives::Address;
 use alloy_signer::utils::public_key_to_address;
 use coins_bip39::{English, Entropy, Mnemonic};
@@ -131,6 +131,19 @@ impl AccountManager {
     pub fn signer(&self, index: u32) -> Result<LocalSigner, AccountError> {
         self.signer_at_path(&self.scheme.path_for(index)?)
     }
+
+    /// The account-level extended public key `m/44'/60'/{account}'`. Addresses under it
+    /// (`crate::core::accounts::derive_address`) derive without the private key — hand it to
+    /// a watch-only service instead of the seed.
+    pub fn account_xpub(&self, account: u32) -> Result<AccountXpub, AccountError> {
+        let path = format!("m/44'/60'/{account}'");
+        let mnemonic = Mnemonic::<English>::new_from_phrase(self.phrase.as_str())
+            .map_err(|_| AccountError::InvalidPhrase)?;
+        let xpriv = mnemonic
+            .derive_key(path.as_str(), self.password())
+            .map_err(|e| AccountError::Derivation(e.to_string()))?;
+        Ok(AccountXpub(xpriv.verify_key()))
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +221,20 @@ mod tests {
         let mgr = AccountManager::from_phrase(MNEMONIC).unwrap();
         let dbg = format!("{mgr:?}");
         assert!(!dbg.contains("junk"), "phrase leaked in Debug: {dbg}");
+    }
+
+    #[test]
+    fn watch_only_xpub_derives_same_addresses_as_the_seed() {
+        use crate::core::accounts::derive_address;
+        let mgr = AccountManager::from_phrase(MNEMONIC).unwrap();
+        let xpub = mgr.account_xpub(0).unwrap();
+        // m/44'/60'/0' + 0/{index} == m/44'/60'/0'/0/{index} == account(index) under Bip44Standard,
+        // proving the public-key-only path matches full seed derivation.
+        for i in 0..3u32 {
+            assert_eq!(
+                derive_address(&xpub, i).unwrap(),
+                mgr.account(i).unwrap().address
+            );
+        }
     }
 }
