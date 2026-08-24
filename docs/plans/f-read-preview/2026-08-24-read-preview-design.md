@@ -12,7 +12,7 @@ Give consumers a read-only **view** of chain state and a pre-sign **simulation**
 
 **In — core, RPC-only over the existing `Rpc`/`Transport`, `sol!` for ABIs:**
 
-- **`ReadClient`** — native balance; ERC-20 balance/allowance/metadata; ERC-721/1155 ownership + balance for **known** contracts; a batched `balances(account, tokens)` (native + per-token) over **Multicall3 `aggregate3`** (per-call `Result`, so one reverting token can't nuke a portfolio scan). Modeled on viem's `PublicClient`.
+- **`ReadClient`** — `chain_id`, `code`/`is_contract` (EOA-vs-contract, deployed check); native balance; ERC-20 balance/allowance/metadata; ERC-721/1155 ownership + balance for **known** contracts; a batched `balances(account, tokens)` (native + per-token) over **Multicall3 `aggregate3`** (per-call `Result`, so one reverting token can't nuke a portfolio scan). Modeled on viem's `PublicClient`. Metadata reads fall back `string`→`bytes32` for non-standard tokens (MKR/DAI); `balances` chunks large lists to stay under node calldata/gas caps and takes an overridable Multicall3 address.
 - **`dry_run` → `TxPreview`** — gas estimate, success/revert with a **decoded reason**, EIP-2930 access list, raw return data. RPC-only via `eth_call` + `eth_estimateGas` + `eth_createAccessList` (alloy exposes `create_access_list` natively; viem/ethers don't). Gas is **advisory** — a dry-run is a lower bound.
 - **`EnsResolver`** — resolve / reverse / text / avatar over the ENS Universal Resolver (`eth_call`).
 - **Enrichment (opt-in ports; the RPC-compatible adapters ship, so core carries no vendor dependency):** `TokenMetadataSource` ← a Uniswap **token-list** adapter; `PriceSource` ← a **Chainlink** `latestRoundData` adapter. Feature `enrich`.
@@ -46,6 +46,11 @@ Object-safe (`#[async_trait]`, `Arc<dyn ReadClient>`); every method returns a co
 ```rust
 #[async_trait]
 pub trait ReadClient: Send + Sync {
+    async fn chain_id(&self) -> Result<u64, ReadError>;
+    /// `eth_getCode`; `is_contract` is `!code.is_empty()` — EOA-vs-contract branching and
+    /// the substrate for later EIP-1271-vs-ECDSA signature dispatch.
+    async fn code(&self, address: Address) -> Result<Bytes, ReadError>;
+    async fn is_contract(&self, address: Address) -> Result<bool, ReadError>;
     async fn native_balance(&self, account: Address) -> Result<U256, ReadError>;
     async fn erc20_balance(&self, token: Address, account: Address) -> Result<U256, ReadError>;
     async fn erc20_allowance(&self, token: Address, owner: Address, spender: Address) -> Result<U256, ReadError>;
@@ -58,14 +63,23 @@ pub trait ReadClient: Send + Sync {
     async fn balances(&self, account: Address, tokens: &[Address]) -> Result<AccountBalances, ReadError>;
 }
 
+// All returned structs/enums are `#[non_exhaustive]` so fields (e.g. a metadata `source`
+// or `logo_uri`, a price `confidence`) can grow later without a breaking change — YAGNI:
+// add the field when a consumer needs it, don't pre-commit the shape now.
+#[non_exhaustive]
 pub struct Erc20Metadata { pub name: String, pub symbol: String, pub decimals: u8 }
-pub struct AccountBalances { pub native: U256, pub tokens: Vec<(Address, Result<U256, ReadError>)> }
+#[non_exhaustive]
+pub struct AccountBalances { pub native: U256, pub tokens: Vec<TokenBalance> }
+/// One token's balance in a batch; `Err` isolates a reverting/non-conforming token
+/// (named struct, not a positional `(Address, Result<…>)` tuple).
+pub struct TokenBalance { pub token: Address, pub balance: Result<U256, ReadError> }
 ```
 
 Adapter internals (`RpcReadClient { provider: DynProvider }` — the provider is `Transport`'s, so reads ride the same failover/retry/hedge layers, not a fresh single endpoint):
 - Typed reads via `sol!` (`IERC20`, `IERC721`, `IERC1155`) — `contract.balanceOf(a).call().await` returns the decoded value.
 - `balances` uses `provider.multicall()` with `.get_eth_balance(account)` folded in and `.aggregate3()` (per-call `Result`); Multicall3 default `0xcA11…CA11`, overridable. Native balance rides *inside* the aggregate, so a "wallet overview" (ETH + N tokens) is **one** RPC round-trip.
-- A `metadata` read is one `aggregate3` of `name`/`symbol`/`decimals` (three calls, one RPC).
+- A `metadata` read is one `aggregate3` of `name`/`symbol`/`decimals` (three calls, one RPC). Each string field decodes `string` first, then falls back to `bytes32` (null-trimmed UTF-8) — non-standard tokens (MKR, DAI, SAI) return `bytes32` and a `string`-only decode would garble/fail (reuse the Solady `MetadataReaderLib` / Uniswap `SafeERC20Namer` pattern, don't hand-roll).
+- `balances` **chunks** a large token list into multiple `aggregate3` calls (node calldata/gas caps; viem defaults ~1024 calldata bytes/chunk) and stitches results, preserving per-token `Result`; the result vector is length-checked before indexing. Multicall3 defaults to the canonical address but is overridable for chains that deploy it elsewhere.
 
 **Reuse:** all of alloy — `sol!`, `MulticallBuilder`, `DynProvider`. No hand-rolled ABI encoding, no bespoke multicall.
 
@@ -108,7 +122,10 @@ pub trait EnsResolver: Send + Sync {
 }
 ```
 
-Adapter notes baked in: reverse lookups **forward-verify** (ENSv2 reverts `ReverseAddressMismatch` on mismatch → treat as `None`, not an error); offchain names trigger CCIP-Read (an HTTP gateway hop), gated behind a flag so a strict RPC-only deployment can disable it.
+Adapter notes baked in (correctness the underlying `alloy-ens` binding does **not** give us for free):
+- **Reverse forward-verify** is mandatory and in-crate: a reverse record is user-settable/unauthenticated, so `reverse_lookup` normalizes the candidate name (ENSIP-15) then forward-resolves it and asserts it maps back to the queried address — mismatch → `None`, never the raw name (spoofing guard). `alloy-ens` `lookup_address` does not do this.
+- **CCIP-Read (EIP-3668) is deferred, strict-RPC is the default.** `alloy-ens` forward resolution routes through the Universal Resolver (so ENSIP-10 wildcard is free) but does **not** follow the `OffchainLookup` revert — offchain/L2 names (Basenames `*.base.eth`, `*.cb.id`, L2 subnames) therefore do **not** resolve yet. Surface that distinctly as `EnsError::OffchainLookupRequired { .. }` (not a generic failure) so callers can detect it and opt into a future CCIP feature (an HTTP gateway hop is a new trust boundary — feature-gated, never silent).
+- `avatar` returns the raw text record (`Option<String>`); typed NFT-avatar (ENSIP-12 `eip155:` + ownership check) resolution is a deferred, separately-named method to avoid a breaking return-type change.
 
 ### Enrichment seam (opt-in, feature `enrich`)
 
@@ -126,7 +143,7 @@ pub trait PriceSource: Send + Sync {
 ```
 
 - **`TokenListSource`** (adapter) — loads a Uniswap-schema token-list JSON (HTTPS/IPFS), builds an in-memory `(chain_id, address) → Erc20Metadata` map; **no RPC at read time**. Core's on-chain `erc20_metadata` fills gaps the list misses.
-- **`ChainlinkPrice`** (adapter) — `AggregatorV3Interface.latestRoundData()` scaled by `decimals()`, staleness-checked via `updatedAt`; **pure RPC** (needs only the feed address per pair/chain), so a "no third-party APIs" deployment still gets prices. CoinGecko is the *same* `PriceSource` trait, deferred.
+- **`ChainlinkPrice`** (adapter) — `AggregatorV3Interface.latestRoundData()` normalized by the feed's own `decimals()`; **pure RPC** (needs only the feed address per pair/chain), so a "no third-party APIs" deployment still gets prices. **Staleness is per-feed, not a single global constant** — heartbeats vary widely (ETH/USD is 3600s on mainnet but 86400s on Arbitrum), so config is a `(chain_id, feed) → heartbeat` map plus a small grace, checked against an injected `Clock` (no ambient time). Every round is validated: `answer > 0`, `updatedAt != 0 && updatedAt <= now`, `roundId != 0`; deprecated `answeredInRound`/`latestAnswer` are not used. A stale feed returns `EnrichError::Stale`, a missing feed returns `Ok(None)`. CoinGecko/Pyth are the *same* `PriceSource` trait, deferred (Pyth's confidence band maps to a future `#[non_exhaustive]` `Price` field).
 
 ## Data flow
 
@@ -167,6 +184,14 @@ Preview:  wallet.dry_run(&intent)
 
 **RPC-vs-indexer boundary** — token *discovery* ([Alchemy `getTokenBalances`](https://www.alchemy.com/docs/reference/token-api-overview), [thirdweb Insight](https://portal.thirdweb.com/changelog/insight-token-owner-queries-add-balances)), NFT *enumeration* ([Alchemy `getNftsForOwner`](https://www.alchemy.com/docs/reference/nft-api-endpoints/nft-api-endpoints/nft-ownership-endpoints/get-nf-ts-for-owner-v-3)), and vendor portfolio/balances ([Circle](https://developers.circle.com/api-reference/wallets/developer-controlled-wallets/list-wallet-balance), [Fireblocks](https://developers.fireblocks.com/reference/getvaultbalancebyasset)) are inherently indexed. Known-address reads, Safe config reads, and all ENS are plain-RPC. **Enrichment** = [Uniswap token-lists](https://github.com/Uniswap/token-lists) (off-chain data) + prices via [Chainlink `AggregatorV3Interface`](https://docs.chain.link/data-feeds/using-data-feeds) (RPC) or [CoinGecko](https://docs.coingecko.com/reference/simple-token-price) (vendor). **ENS** — four verbs over the Universal Resolver via `eth_call` ([viem ENS](https://viem.sh/docs/ens/actions/getEnsAddress)); reverse forward-verifies.
 
+## Research pass (2026-08-24) — what was folded in vs. deferred
+
+A 4-agent survey of read/preview/enrichment surfaces across viem/ethers/alloy/wagmi, Tenderly/Alchemy/Blocknative/`eth_simulateV1`, Circle/Fireblocks/Privy/Safe/thirdweb/Alchemy-Account-Kit, and Chainlink/token-lists/ENS. Scope decision: **lean + minimal reads** (correctness plus the trivially-justified reads), everything else deferred behind `#[non_exhaustive]` per YAGNI.
+
+- **Folded into F1 (correctness / house-rules, non-optional):** bytes32 metadata fallback; `balances` chunking + result-length guard + overridable Multicall3; per-feed Chainlink staleness + round validation; ENS name normalization + reverse forward-verify + typed `OffchainLookupRequired`; `#[non_exhaustive]` on every returned struct/enum; named `TokenBalance` (no mixed-type tuple).
+- **Folded into F1 (minimal reads):** `chain_id()`, `code()`/`is_contract()`.
+- **Deferred behind `#[non_exhaustive]` / seams (add when a consumer lands):** preview `state_overrides` + `dry_run` at `pending` + `block: Option<BlockId>`; fee/total-fee read surface; local ABI `decode_call`; NFT metadata URIs; unlimited-approval detector; EIP-1271/6492 verify + `predict_address`/HD (→ F2, design the `factory`/`factory_data` return fields there); `dry_run_many` bundles (`eth_simulateV1`, partial support); asset-delta/log/trace preview (`AssetPreview`); vendor adapters; multi-source prices/TWAP/Pyth; avatar-NFT resolution; token-list auto-refresh; CCIP-Read; EIP-2612/5267/4626.
+
 ## Locked decisions
 
 1. **Core is RPC-only and vendor-free.** A read is core iff the contract address is known; discovery/enumeration/vendor-portfolio is a deferred indexer seam.
@@ -176,3 +201,7 @@ Preview:  wallet.dry_run(&intent)
 5. **ENS is its own small port** (four verbs), plain-RPC; offchain CCIP-Read behind a flag.
 6. **Reads are standalone**, not bound to the wallet's single account (they target arbitrary addresses); `Wallet::dry_run` is a convenience over the wallet's chain.
 7. **`ReadClient` reuses `Transport`'s resilient provider** (failover/retry/hedge from sub-project 0), never a naive single endpoint — the read path gets the same reliability as the write path for free.
+8. **Correctness the libraries don't hand us is in-crate and non-optional:** bytes32 metadata fallback, per-feed Chainlink staleness + round validation, and ENS reverse forward-verification. These are the sharp edges `alloy`/`alloy-ens`/Chainlink leave to the caller.
+9. **`#[non_exhaustive]` on every returned struct/enum**, so deferred fields (metadata `source`/`logo_uri`, price `confidence`, …) are added when a consumer needs them — grow, don't pre-commit (YAGNI). Return-*type* changes (e.g. a typed `Avatar`) instead land as new, separately-named methods.
+10. **Minimal reads only:** `chain_id`/`code`/`is_contract` ship now (EIP-712 domain + EOA-vs-contract branching); the broader confirm-screen surface (state overrides, fee/total-fee, ABI decode, NFT URIs, call bundles) is deferred until a real consumer needs it — the port/struct shapes don't preclude it.
+11. **Enrichment stays in F1 but is built correctly** (per-feed staleness, bytes32 fallback); vendor price/metadata adapters remain deferred behind the same ports.
