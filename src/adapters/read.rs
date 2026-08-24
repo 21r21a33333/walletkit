@@ -95,7 +95,6 @@ impl ReadClient for RpcReadClient {
     }
 
     async fn erc20_metadata(&self, token: Address) -> Result<Erc20Metadata, ReadError> {
-        // name/symbol/decimals in one aggregate3 (three calls, one RPC).
         let mut mc = self.multicall();
         mc.add(token, &IERC20::nameCall {})
             .add(token, &IERC20::symbolCall {})

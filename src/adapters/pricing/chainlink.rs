@@ -56,6 +56,7 @@ impl ChainlinkPrice {
 
 /// One decoded `latestRoundData` round, reduced to what pricing needs.
 struct Round {
+    round_id: u128,
     answer: I256,
     updated_at: u64,
 }
@@ -78,12 +79,8 @@ impl PriceSource for ChainlinkPrice {
         let agg = AggregatorV3Interface::new(feed.address, &self.provider);
         let decimals = agg.decimals().call().await.map_err(price_err)?;
         let data = agg.latestRoundData().call().await.map_err(price_err)?;
-        if data.roundId.is_zero() {
-            return Err(PricingError::Feed {
-                detail: "zero round id".into(),
-            });
-        }
         let round = Round {
+            round_id: data.roundId.to::<u128>(),
             answer: data.answer,
             updated_at: data.updatedAt.saturating_to::<u64>(),
         };
@@ -100,9 +97,9 @@ fn to_price(
     now: u64,
     max_age_secs: u64,
 ) -> Result<Price, PricingError> {
-    if round.updated_at == 0 || round.updated_at > now {
+    if round.round_id == 0 || round.updated_at == 0 || round.updated_at > now {
         return Err(PricingError::Feed {
-            detail: "invalid round timestamp".into(),
+            detail: "invalid round".into(),
         });
     }
     // A non-positive answer is a feed fault (stale/misconfigured), not a real price.
@@ -137,6 +134,7 @@ mod tests {
 
     fn round(answer: i128, updated_at: u64) -> Round {
         Round {
+            round_id: 1,
             answer: I256::try_from(answer).unwrap(),
             updated_at,
         }
@@ -157,13 +155,25 @@ mod tests {
             Err(PricingError::Stale { age_secs: 4000 })
         ));
 
-        // Non-positive answer and future/zero timestamp are feed faults.
+        // Non-positive answer, future/zero timestamp, and a zero round id are feed faults.
         assert!(matches!(
             to_price(round(0, 1_000), 8, 1_030, 3_660),
             Err(PricingError::Feed { .. })
         ));
         assert!(matches!(
             to_price(round(1, 0), 8, 1_030, 3_660),
+            Err(PricingError::Feed { .. })
+        ));
+        assert!(matches!(
+            to_price(
+                Round {
+                    round_id: 0,
+                    ..round(1, 1_000)
+                },
+                8,
+                1_030,
+                3_660
+            ),
             Err(PricingError::Feed { .. })
         ));
     }

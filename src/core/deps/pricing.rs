@@ -48,7 +48,7 @@ pub enum Currency {
 #[non_exhaustive]
 pub enum PricingError {
     #[error(transparent)]
-    Rpc(RpcError),
+    Rpc(#[from] RpcError),
     #[error("token list error: {detail}")]
     List { detail: String },
     /// A price-feed round failed validation (non-positive answer, zero/future timestamp, …).

@@ -1,6 +1,7 @@
 //! `EnsResolver` — object-safe ENS name resolution over plain RPC. `None` means "no
 //! record" (unregistered, no resolver, or a reverse name that fails forward-verification);
-//! only transport/operational failures are `Err`.
+//! only transport/operational failures are `Err`. Names are hashed verbatim, so the caller
+//! passes ENSIP-15-normalized names.
 
 use crate::core::deps::RpcError;
 use alloy_primitives::Address;
@@ -26,7 +27,7 @@ pub trait EnsResolver: Send + Sync {
 #[non_exhaustive]
 pub enum EnsError {
     #[error(transparent)]
-    Rpc(RpcError),
+    Rpc(#[from] RpcError),
     /// The name needs EIP-3668 CCIP-Read (an offchain/L2 name — Basenames `*.base.eth`,
     /// `*.cb.id`, L2 subnames). Strict RPC does not follow the gateway hop; surfaced
     /// distinctly so a caller can opt into a future CCIP feature.

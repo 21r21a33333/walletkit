@@ -15,8 +15,8 @@ use alloy_sol_types::{SolCall, SolType, SolValue};
 /// Canonical Multicall3 deployment — the same address on every chain (keyless deploy).
 pub const MULTICALL3_ADDRESS: Address = address!("0xcA11bde05977b3631167028862bE2a173976CA11");
 
-/// Max sub-calls per `aggregate3` round-trip; a larger batch is split so it can't exceed a
-/// node's `eth_call` gas/calldata cap.
+/// Max sub-calls per `aggregate3` round-trip; a larger batch is split across round-trips. A
+/// conservative heuristic (not a protocol limit) to stay under a node's `eth_call` gas/calldata cap.
 const MAX_CALLS_PER_BATCH: usize = 400;
 
 alloy_sol_types::sol! {

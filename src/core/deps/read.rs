@@ -10,8 +10,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait ReadClient: Send + Sync {
     async fn chain_id(&self) -> Result<u64, ReadError>;
-    /// `eth_getCode` at latest; [`is_contract`](Self::is_contract) is `!code.is_empty()`
-    /// — EOA-vs-contract branching and the substrate for later EIP-1271-vs-ECDSA dispatch.
+    /// `eth_getCode` at latest; [`is_contract`](Self::is_contract) is `!code.is_empty()`.
     async fn code(&self, address: Address) -> Result<Bytes, ReadError>;
     async fn is_contract(&self, address: Address) -> Result<bool, ReadError>;
     async fn native_balance(&self, account: Address) -> Result<U256, ReadError>;
@@ -40,9 +39,6 @@ pub trait ReadClient: Send + Sync {
         tokens: &[Address],
     ) -> Result<AccountBalances, ReadError>;
 }
-
-// The returned structs are `#[non_exhaustive]` so fields (a metadata `source`/`logo_uri`,
-// a price `confidence`) can be added when a consumer needs them — grow, don't pre-commit.
 
 /// ERC-20 display metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
