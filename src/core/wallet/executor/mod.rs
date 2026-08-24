@@ -10,7 +10,7 @@ mod lifecycle;
 
 pub use lifecycle::{ChainEvent, ChainView, Finality, FinalityConfig, Outcome, transition};
 
-use super::signing;
+use super::{TransactionManager, signing};
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
@@ -58,6 +58,9 @@ pub struct AccountExecutor {
     account: Address,
     required_confirmations: u64,
     bump_timeout: u64,
+    /// When set, a foreign `Replaced` re-executes the intent through this send pipeline at a
+    /// fresh nonce (opt-in intent-refill). `None` disables it.
+    refill: Option<Arc<TransactionManager>>,
     /// Lossy cache of the one thing a handle can't persist — the bump approval
     /// capability. A cache miss just means "re-evaluate policy on the next bump", so
     /// every persisted handle is bump-eligible with or without an entry here.
@@ -99,6 +102,7 @@ impl AccountExecutor {
             account,
             required_confirmations: DEFAULT_REQUIRED_CONFIRMATIONS,
             bump_timeout: DEFAULT_BUMP_TIMEOUT_SECS,
+            refill: None,
             approvals: Mutex::new(HashMap::new()),
             last_latest: AtomicU64::new(0),
         }
@@ -113,6 +117,13 @@ impl AccountExecutor {
     /// Override the pending-before-bump timeout (seconds).
     pub fn with_bump_timeout(mut self, secs: u64) -> Self {
         self.bump_timeout = secs;
+        self
+    }
+
+    /// Enable intent-refill: re-execute an intent displaced by a foreign tx via `manager`'s
+    /// send pipeline. Off unless set.
+    pub fn with_refill(mut self, manager: Arc<TransactionManager>) -> Self {
+        self.refill = Some(manager);
         self
     }
 
@@ -183,8 +194,32 @@ impl AccountExecutor {
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
                 self.approvals.lock().remove(&handle.id);
             }
+            // A foreign replacement (never a cancel — that settled Dropped above) re-executes
+            // the intent when refill is on.
+            if let Some(manager) = &self.refill
+                && handle.status == TxStatus::Replaced
+                && !handle.refilled
+            {
+                self.refill_intent(manager, &mut handle).await;
+            }
         }
         Ok(())
+    }
+
+    /// Best-effort re-execution of a displaced intent at a fresh nonce + fresh approval. Marks
+    /// only this handle; the child stays unmarked, so a re-displaced child refills again until
+    /// an attempt mines. A failure is logged, never aborts the tick.
+    async fn refill_intent(&self, manager: &TransactionManager, handle: &mut TxHandle) {
+        // `_child`/`_err` are read only by the obs macros; the underscore keeps a
+        // `--no-default-features` build (where they are no-ops) warning-free.
+        match manager.send(&handle.intent).await {
+            Ok(_child) => {
+                handle.refilled = true;
+                let _ = self.state_store.put_handle(handle).await;
+                debug!(nonce = _child.nonce, "intent refilled after replacement");
+            }
+            Err(_err) => warn!(error = %_err, nonce = handle.nonce, "refill failed"),
+        }
     }
 
     /// Read one consistent [`Cycle`] snapshot and resolve its finality rule: prefer the

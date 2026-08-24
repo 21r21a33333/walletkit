@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 /// A per-account wallet runtime. Build it with [`Wallet::builder`], `send` intents,
 /// query `status`, and drive `tick` (or `run`) to confirm and bump.
 pub struct Wallet {
-    manager: TransactionManager,
+    manager: Arc<TransactionManager>,
     executor: AccountExecutor,
     store: Arc<dyn StateStore>,
     account: Address,
@@ -47,6 +47,7 @@ impl Wallet {
             bump_timeout: None,
             gas_ceiling: u128::MAX,
             gas_buffer_pct: None,
+            refill_on_replaced: false,
         }
     }
 
@@ -161,6 +162,7 @@ pub struct WalletBuilder {
     bump_timeout: Option<u64>,
     gas_ceiling: u128,
     gas_buffer_pct: Option<u128>,
+    refill_on_replaced: bool,
 }
 
 impl WalletBuilder {
@@ -186,6 +188,12 @@ impl WalletBuilder {
     }
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
+        self
+    }
+    /// Re-execute an intent displaced by a *foreign* tx at a fresh nonce, retrying until it
+    /// mines. Off by default; a cancelled tx is never refilled.
+    pub fn refill_on_replaced(mut self, on: bool) -> Self {
+        self.refill_on_replaced = on;
         self
     }
 
@@ -214,6 +222,7 @@ impl WalletBuilder {
         if let Some(pct) = self.gas_buffer_pct {
             manager = manager.with_gas_buffer_pct(pct);
         }
+        let manager = Arc::new(manager);
 
         let mut executor = AccountExecutor::new(
             self.rpc,
@@ -231,6 +240,9 @@ impl WalletBuilder {
         }
         if let Some(secs) = self.bump_timeout {
             executor = executor.with_bump_timeout(secs);
+        }
+        if self.refill_on_replaced {
+            executor = executor.with_refill(manager.clone());
         }
 
         Wallet {

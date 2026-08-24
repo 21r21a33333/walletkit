@@ -63,10 +63,13 @@ impl Localnet {
         confirmations: u64,
     ) -> Option<Localnet> {
         // `--slots-in-an-epoch 1` advances anvil's `finalized` tag ~1 block (vs ~64), so the
-        // executor's finalized-anchored confirm settles within a few mined blocks.
+        // executor's finalized-anchored confirm settles within a few mined blocks. `--accounts
+        // 16` funds enough dev accounts for every scenario's distinct signing account.
         let anvil = Anvil::new()
             .arg("--slots-in-an-epoch")
             .arg("1")
+            .arg("--accounts")
+            .arg("16")
             .try_spawn()
             .ok()?;
         let endpoint = anvil.endpoint_url();
@@ -74,7 +77,13 @@ impl Localnet {
             .ok()?
             .address();
         let (store, _store_tmp) = build_store(backend, account).await?;
-        let wallet = build_wallet(&endpoint, account_index, store.clone(), confirmations)?;
+        let wallet = build_wallet(
+            &endpoint,
+            account_index,
+            store.clone(),
+            confirmations,
+            false,
+        )?;
         let control = ProviderBuilder::new()
             .connect_http(endpoint.clone())
             .erased();
@@ -100,8 +109,23 @@ impl Localnet {
                 self.account_index,
                 self.store.clone(),
                 self.confirmations,
+                false,
             )
             .expect("rebuild wallet"),
+        )
+    }
+
+    /// A wallet with intent-refill enabled, over the same store — for the refill scenarios.
+    pub fn refill_wallet(&self) -> Arc<Wallet> {
+        Arc::new(
+            build_wallet(
+                &self.endpoint,
+                self.account_index,
+                self.store.clone(),
+                self.confirmations,
+                true,
+            )
+            .expect("refill wallet"),
         )
     }
 
@@ -211,6 +235,7 @@ fn build_wallet(
     account_index: u32,
     store: Arc<dyn StateStore>,
     confirmations: u64,
+    refill_on_replaced: bool,
 ) -> Option<Wallet> {
     let signer = LocalSigner::from_mnemonic(ANVIL_MNEMONIC, account_index).ok()?;
     let transport = Transport::single(endpoint.clone()).ok()?;
@@ -224,6 +249,7 @@ fn build_wallet(
             .confirmations(confirmations)
             .bump_timeout(0)
             .gas_ceiling(u128::MAX)
+            .refill_on_replaced(refill_on_replaced)
             .store(store)
             .build(),
     )

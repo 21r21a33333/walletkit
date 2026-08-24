@@ -8,6 +8,7 @@ mod support;
 
 use std::future::Future;
 use support::{Backend, Localnet};
+use walletkit::Wallet;
 use walletkit::core::wallet::{HandleId, TxStatus};
 
 /// One `#[tokio::test]` per (scenario × backend). A scenario is an `async fn(Localnet)`; the
@@ -68,14 +69,25 @@ fn is_terminal(status: &Option<TxStatus>) -> bool {
 /// Mine + tick up to `rounds` times until `id` settles (I3: a tracked tx always settles,
 /// never hangs). Returns the final status.
 async fn settle(net: &Localnet, id: HandleId, rounds: u32) -> Option<TxStatus> {
-    let mut status = net.wallet.status(id).await.expect("status");
+    settle_with(net, &net.wallet, id, rounds).await
+}
+
+/// As [`settle`] but driving `wallet` — for scenarios that use a wallet other than the
+/// harness default (e.g. a refill-enabled one).
+async fn settle_with(
+    net: &Localnet,
+    wallet: &Wallet,
+    id: HandleId,
+    rounds: u32,
+) -> Option<TxStatus> {
+    let mut status = wallet.status(id).await.expect("status");
     for _ in 0..rounds {
         if is_terminal(&status) {
             break;
         }
         net.mine(2).await;
-        net.wallet.tick().await.expect("tick");
-        status = net.wallet.status(id).await.expect("status");
+        wallet.tick().await.expect("tick");
+        status = wallet.status(id).await.expect("status");
     }
     status
 }
@@ -285,6 +297,74 @@ async fn cancel_settles_original_as_dropped(net: Localnet) {
     assert_confirms(&net, fresh.id).await;
 }
 
+async fn intent_refilled_after_foreign_replacement(net: Localnet) {
+    net.no_auto_mine().await;
+    let wallet = net.refill_wallet();
+
+    let original = wallet.send(&net.intent(1)).await.expect("send");
+    assert_eq!(original.nonce, 0);
+
+    // A foreign tx consumes nonce 0; ticking settles the original Replaced and, as it
+    // terminalizes, refills the intent at the freed nonce.
+    net.steal_nonce(0).await;
+    net.mine(3).await;
+    let original_status = settle_with(&net, &wallet, original.id, 8).await;
+    assert!(
+        matches!(original_status, Some(TxStatus::Replaced)),
+        "original Replaced, got {original_status:?}"
+    );
+    let original = wallet
+        .handle(original.id)
+        .await
+        .expect("handle")
+        .expect("present");
+    assert!(original.refilled, "original marked refilled");
+
+    // The child carries the same intent (same hash) at nonce 1 and confirms.
+    let child_id = HandleId::new(original.intent_hash, 1);
+    let child = settle_with(&net, &wallet, child_id, 8).await;
+    assert!(
+        matches!(child, Some(TxStatus::Confirmed { .. })),
+        "refill child Confirmed, got {child:?}"
+    );
+}
+
+async fn intent_refills_until_mined(net: Localnet) {
+    net.no_auto_mine().await;
+    let wallet = net.refill_wallet();
+
+    let original = wallet.send(&net.intent(1)).await.expect("send");
+
+    // First displacement: steal nonce 0 → the original settles Replaced and refills to nonce 1.
+    net.steal_nonce(0).await;
+    net.mine(3).await;
+    let s0 = settle_with(&net, &wallet, original.id, 8).await;
+    assert!(
+        matches!(s0, Some(TxStatus::Replaced)),
+        "original Replaced, got {s0:?}"
+    );
+
+    // Second displacement: steal the refill's nonce 1 → it too settles Replaced and refills
+    // to nonce 2, since a child is left unmarked.
+    let child1 = HandleId::new(original.intent_hash, 1);
+    net.steal_nonce(1).await;
+    net.mine(3).await;
+    let s1 = settle_with(&net, &wallet, child1, 8).await;
+    assert!(
+        matches!(s1, Some(TxStatus::Replaced)),
+        "first refill Replaced, got {s1:?}"
+    );
+
+    // The third attempt (nonce 2) is not displaced and confirms — the chain re-fired past a
+    // single displacement.
+    let child2 = HandleId::new(original.intent_hash, 2);
+    let s2 = settle_with(&net, &wallet, child2, 8).await;
+    assert!(
+        matches!(s2, Some(TxStatus::Confirmed { .. })),
+        "third attempt Confirmed, got {s2:?}"
+    );
+}
+
 async fn every_tx_settles_within_bounded_ticks(net: Localnet) {
     let handle = net.wallet.send(&net.intent(1)).await.expect("send");
     let status = settle(&net, handle.id, 10).await;
@@ -304,4 +384,6 @@ localnet_matrix! {
     restart_reconciles_a_tx_mined_during_downtime   { account: 7, confirmations: 1 },
     every_tx_settles_within_bounded_ticks           { account: 8, confirmations: 1 },
     cancel_settles_original_as_dropped              { account: 9, confirmations: 1 },
+    intent_refilled_after_foreign_replacement       { account: 10, confirmations: 1 },
+    intent_refills_until_mined                      { account: 11, confirmations: 1 },
 }
