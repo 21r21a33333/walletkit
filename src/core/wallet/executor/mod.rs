@@ -10,7 +10,7 @@ mod lifecycle;
 
 pub use lifecycle::{ChainEvent, ChainView, Finality, FinalityConfig, Outcome, transition};
 
-use super::signing;
+use super::{TransactionManager, signing};
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
@@ -18,10 +18,8 @@ use crate::core::deps::{
 };
 use crate::core::wallet::{Decision, HandleId, PolicyApproval, SigningRequest, TxHandle, TxStatus};
 use crate::obs::{debug, info, warn};
-use alloy_consensus::TxEnvelope;
-use alloy_eips::Decodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Address;
 use alloy_rpc_types_eth::TransactionReceipt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -60,6 +58,9 @@ pub struct AccountExecutor {
     account: Address,
     required_confirmations: u64,
     bump_timeout: u64,
+    /// When set, a foreign `Replaced` re-executes the intent through this send pipeline at a
+    /// fresh nonce (opt-in intent-refill). `None` disables it.
+    refill: Option<Arc<TransactionManager>>,
     /// Lossy cache of the one thing a handle can't persist — the bump approval
     /// capability. A cache miss just means "re-evaluate policy on the next bump", so
     /// every persisted handle is bump-eligible with or without an entry here.
@@ -101,6 +102,7 @@ impl AccountExecutor {
             account,
             required_confirmations: DEFAULT_REQUIRED_CONFIRMATIONS,
             bump_timeout: DEFAULT_BUMP_TIMEOUT_SECS,
+            refill: None,
             approvals: Mutex::new(HashMap::new()),
             last_latest: AtomicU64::new(0),
         }
@@ -115,6 +117,13 @@ impl AccountExecutor {
     /// Override the pending-before-bump timeout (seconds).
     pub fn with_bump_timeout(mut self, secs: u64) -> Self {
         self.bump_timeout = secs;
+        self
+    }
+
+    /// Enable intent-refill: re-execute an intent displaced by a foreign tx via `manager`'s
+    /// send pipeline. Off unless set.
+    pub fn with_refill(mut self, manager: Arc<TransactionManager>) -> Self {
+        self.refill = Some(manager);
         self
     }
 
@@ -169,6 +178,10 @@ impl AccountExecutor {
             else {
                 continue;
             };
+            let next = match next {
+                TxStatus::Replaced if handle.cancelled => TxStatus::Dropped,
+                other => other,
+            };
             // `_prev` is read only by the transition events below; the underscore keeps a
             // `--no-default-features` build (where the obs macros are no-ops) warning-free.
             let _prev = std::mem::replace(&mut handle.status, next);
@@ -177,12 +190,32 @@ impl AccountExecutor {
             } else {
                 debug!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "status advanced");
             }
-            // A terminal handle no longer needs its cached approval.
+            // Refill is gated on the persist succeeding: a terminal handle that failed to
+            // persist stays in `pending_handles` and re-transitions next tick, so firing
+            // refill here would double-spawn the intent.
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
                 self.approvals.lock().remove(&handle.id);
+                // A foreign replacement (never a cancel — that settled Dropped above)
+                // re-executes the intent when refill is on.
+                if let Some(manager) = &self.refill
+                    && handle.status == TxStatus::Replaced
+                {
+                    self.refill_intent(manager, &handle).await;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Best-effort re-execution of a displaced intent at a fresh nonce + fresh approval. The
+    /// child is a fresh handle, so if it too is displaced it refills again until an attempt
+    /// mines. A failure is logged, never aborts the tick.
+    async fn refill_intent(&self, manager: &TransactionManager, handle: &TxHandle) {
+        // Underscore keeps `_child`/`_err` warning-free when the obs macros are no-ops.
+        match manager.send(&handle.intent).await {
+            Ok(_child) => debug!(nonce = _child.nonce, "intent refilled after replacement"),
+            Err(_err) => warn!(error = %_err, nonce = handle.nonce, "refill failed"),
+        }
     }
 
     /// Read one consistent [`Cycle`] snapshot and resolve its finality rule: prefer the
@@ -284,10 +317,10 @@ impl AccountExecutor {
             return Ok(());
         }
         // The current fees + gas limit live in the persisted signed tx.
-        let Some((fees, gas_limit)) = decode_fees(&handle.signed) else {
+        let Some(current) = signing::decode_fees(&handle.signed) else {
             return Ok(()); // undecodable (never our own tx) -> leave it
         };
-        let bumped = match self.gas_oracle.bump(fees).await {
+        let bumped = match self.gas_oracle.bump(current.fees).await {
             Ok(fees) => fees,
             // At the ceiling we stop and leave the tx as-is (an operator signal, not a retry).
             Err(GasOracleError::CeilingExceeded { .. }) => {
@@ -310,18 +343,18 @@ impl AccountExecutor {
             return Ok(()); // policy revoked or tightened below the bump -> leave the tx
         };
 
-        let tx = signing::build_tx(&handle.intent, handle.nonce, gas_limit, bumped);
-        let (rlp, tx_hash) =
+        let tx = signing::build_tx(&handle.intent, handle.nonce, current.gas_limit, bumped);
+        let signed =
             signing::sign_encode(&*self.signer, tx, handle.intent_hash, &approval, now).await?;
-        match self.submission.submit(rlp.clone()).await {
+        match self.submission.submit(signed.rlp.clone()).await {
             Ok(_) => {}
             // Already in the mempool (a prior round's replacement): record it, not an error.
             Err(e) if e.is_already_accepted() => {}
             Err(e) => return Err(e.into()),
         }
 
-        handle.signed = rlp;
-        handle.broadcasts.push(tx_hash);
+        handle.signed = signed.rlp;
+        handle.broadcasts.push(signed.hash);
         handle.last_broadcast_at = now;
         self.state_store.put_handle(handle).await?;
         self.approvals.lock().insert(handle.id, approval);
@@ -350,27 +383,18 @@ impl AccountExecutor {
         {
             return Ok(Some(approval));
         }
-        let request = SigningRequest::Transaction(handle.intent.clone());
+        // `Cancel` default-allows a self-send; `Transaction` doesn't, so a stuck cancel
+        // would wedge on the wrong shape.
+        let intent = handle.intent.clone();
+        let request = if intent.is_self_send() {
+            SigningRequest::Cancel(intent)
+        } else {
+            SigningRequest::Transaction(intent)
+        };
         match self.policy.evaluate(&request).await? {
             Decision::Allow(approval) => Ok(admits(&approval).then_some(approval)),
             Decision::Deny(_) => Ok(None),
         }
-    }
-}
-
-/// Recover the fee fields + gas limit from a persisted EIP-1559 signed tx; a non-1559
-/// envelope can't be bumped by this path.
-fn decode_fees(signed: &Bytes) -> Option<(Eip1559Estimation, u64)> {
-    match TxEnvelope::decode_2718(&mut signed.as_ref()).ok()? {
-        TxEnvelope::Eip1559(signed_tx) => {
-            let tx = signed_tx.tx();
-            let fees = Eip1559Estimation {
-                max_fee_per_gas: tx.max_fee_per_gas,
-                max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
-            };
-            Some((fees, tx.gas_limit))
-        }
-        _ => None,
     }
 }
 
@@ -403,7 +427,7 @@ mod tests {
         Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, Submit,
         estimation, handle, receipt, receipt_unanchored, signed_legacy,
     };
-    use alloy_primitives::B256;
+    use alloy_primitives::{B256, Bytes};
 
     // --- Recover / confirm ---
 
@@ -899,7 +923,9 @@ mod tests {
         exec.escalate().await.unwrap();
         assert_eq!(store.all()[0].broadcasts.len(), 2);
         // signed advanced to the bumped 200/1 body, not the original 100/1.
-        let (fees, _) = decode_fees(&store.all()[0].signed).expect("bumped 1559 body");
+        let fees = signing::decode_fees(&store.all()[0].signed)
+            .expect("bumped 1559 body")
+            .fees;
         assert_eq!(fees.max_fee_per_gas, 200);
         assert_eq!(fees.max_priority_fee_per_gas, 1);
     }
@@ -1195,6 +1221,53 @@ mod tests {
             store.all()[0].status,
             TxStatus::Replacing { since_block: 20 }
         );
+    }
+
+    #[tokio::test]
+    async fn stuck_cancel_bumps_via_cancel_request() {
+        // Real engine, no rules: `Transaction` self-send default-denies, `Cancel` default-
+        // allows. If `bump_approval` picks by shape, the RBF proceeds; a wrong pick wedges.
+        use crate::adapters::SystemClock;
+        use crate::adapters::policy::DefaultPolicyEngine;
+        use crate::core::wallet::TxIntent;
+        use alloy_primitives::{TxKind, U256};
+
+        let account = Address::ZERO;
+        let self_send = TxIntent {
+            chain_id: 1,
+            account,
+            to: TxKind::Call(account),
+            value: U256::ZERO,
+            input: Bytes::new(),
+            purpose: None,
+        };
+        let intent_hash = self_send.hash();
+        let mut h = handle(4, TxStatus::Sent);
+        h.intent = self_send;
+        h.intent_hash = intent_hash;
+        h.id = HandleId::new(intent_hash, 4);
+
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&h).await.unwrap();
+        let exec = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .policy(Arc::new(DefaultPolicyEngine::new(
+                vec![],
+                Arc::new(SystemClock),
+            )))
+            .store(store.clone())
+            .bump_timeout(0)
+            .executor();
+        exec.escalate().await.unwrap();
+
+        assert_eq!(store.all()[0].broadcasts.len(), 2);
     }
 
     #[tokio::test]

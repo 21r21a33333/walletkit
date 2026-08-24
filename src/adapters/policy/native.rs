@@ -160,7 +160,10 @@ impl DefaultPolicyEngine {
                 Verdict::Abstain => {}
             }
         }
-        if !allowed {
+        // A self-send cancel default-allows even with no rule (you must be able to abort
+        // your own tx); a rule `Deny` still short-circuits above.
+        let cancel_ok = matches!(request, SigningRequest::Cancel(i) if i.is_self_send());
+        if !allowed && !cancel_ok {
             return Decision::Deny(PolicyRejection {
                 rule: "default-deny".into(),
                 field: None,
@@ -298,6 +301,41 @@ mod tests {
             "message": { "x": "1" }
         });
         SigningRequest::TypedData(Box::new(serde_json::from_value(json).expect("typed data")))
+    }
+
+    #[tokio::test]
+    async fn cancel_allows_a_self_send_and_denies_a_smuggled_non_self_send() {
+        // No rules: a genuine self-send cancel default-allows (you can always abort your own
+        // stuck tx); a cancel wrapping any other intent falls through to default-deny.
+        let engine = DefaultPolicyEngine::new(vec![], Arc::new(FixedClock));
+        let acct = Address::from([0x11; 20]);
+        let self_send = TxIntent {
+            chain_id: 1,
+            account: acct,
+            to: TxKind::Call(acct),
+            value: U256::ZERO,
+            input: Default::default(),
+            purpose: None,
+        };
+        assert!(matches!(
+            engine
+                .evaluate(&SigningRequest::Cancel(self_send.clone()))
+                .await
+                .unwrap(),
+            Decision::Allow(_)
+        ));
+
+        let smuggled = TxIntent {
+            to: TxKind::Call(Address::from([0x22; 20])),
+            ..self_send
+        };
+        assert!(matches!(
+            engine
+                .evaluate(&SigningRequest::Cancel(smuggled))
+                .await
+                .unwrap(),
+            Decision::Deny(_)
+        ));
     }
 
     #[tokio::test]

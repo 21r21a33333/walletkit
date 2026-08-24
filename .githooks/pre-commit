@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Pre-commit gate for the CLAUDE.md comment standard: reject newly-added Rust comments
+# that narrate dev-process, code history, or a future roadmap (comments describe the code
+# as it is, why-not-what). `git commit --no-verify` bypasses a genuine false positive.
+set -euo pipefail
+
+# Added comment lines in staged Rust files (added `+` lines that contain `//`, minus the
+# `+++ b/…` diff header).
+added=$(git diff --cached --unified=0 --diff-filter=AM -- '*.rs' \
+        | grep -E '^\+[^+]' | grep -E '//' || true)
+[ -z "$added" ] && exit 0
+
+violations=""
+check() { # <label> <extended-regex>
+  local hits
+  hits=$(printf '%s\n' "$added" | grep -inE "$2" || true)
+  if [ -n "$hits" ]; then
+    violations+=$'\n'"  ✗ $1"$'\n'"$(printf '%s\n' "$hits" | sed 's/^/      /')"$'\n'
+  fi
+}
+
+check "dev-process breadcrumb (Task/Step/Phase N, X-T#)" \
+  '//.*\b(task|step|phase)[[:space:]]+[0-9]|//.*\b[a-d]-t[0-9]'
+check "code-history narration (describe the code, not its past)" \
+  '//.*\b(used to be|used to live|used to hold|formerly|refactored|was renamed|was moved)\b'
+check "future-promise / roadmap reference" \
+  '//.*(grows in phase|arrives (later|in phase)|lands (later|in phase)|will (grow|arrive|land|be added))'
+
+if [ -n "$violations" ]; then
+  printf '%s\n' "✗ commit blocked — comments violate the CLAUDE.md standard:$violations"
+  echo "  Rewrite the flagged lines, or 'git commit --no-verify' for a true false positive."
+  exit 1
+fi

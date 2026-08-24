@@ -3,7 +3,8 @@
 
 use crate::core::deps::{Signer, SignerError};
 use crate::core::wallet::{IntentHash, PolicyApproval, TxIntent};
-use alloy_consensus::{SignableTransaction, TxEip1559};
+use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+use alloy_eips::Decodable2718;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Bytes, TxHash};
@@ -28,8 +29,20 @@ pub(crate) fn build_tx(
     }
 }
 
-/// Sign through the [`Signer`] gate and 2718-encode, returning the raw rlp and its
-/// tx hash. The gate (bound intent, envelope, non-expiry) lives in the signer.
+/// A 2718-encoded signed transaction paired with its hash.
+pub(crate) struct SignedTx {
+    pub rlp: Bytes,
+    pub hash: TxHash,
+}
+
+/// Fee fields and gas limit decoded from a persisted 1559 signed body.
+pub(crate) struct SignedFees {
+    pub fees: Eip1559Estimation,
+    pub gas_limit: u64,
+}
+
+/// Sign through the [`Signer`] gate and 2718-encode. The gate (bound intent, envelope,
+/// non-expiry) lives in the signer.
 ///
 /// `skip_all` is mandatory: the arguments carry the key-adjacent `approval`, the tx, and
 /// the signature — none may become a span field. Only the safe `intent_hash` is recorded.
@@ -43,13 +56,33 @@ pub(crate) async fn sign_encode(
     intent_hash: IntentHash,
     approval: &PolicyApproval,
     now: u64,
-) -> Result<(Bytes, TxHash), SignerError> {
+) -> Result<SignedTx, SignerError> {
     let signature = signer
         .sign_transaction(&tx, intent_hash, approval, now)
         .await?;
     let signed = tx.into_signed(signature);
     let hash = *signed.hash();
-    Ok((Bytes::from(signed.encoded_2718()), hash))
+    Ok(SignedTx {
+        rlp: Bytes::from(signed.encoded_2718()),
+        hash,
+    })
+}
+
+/// Recover fee fields + gas limit from a 1559 signed tx; `None` for non-1559 envelopes.
+pub(crate) fn decode_fees(signed: &Bytes) -> Option<SignedFees> {
+    match TxEnvelope::decode_2718(&mut signed.as_ref()).ok()? {
+        TxEnvelope::Eip1559(signed_tx) => {
+            let tx = signed_tx.tx();
+            Some(SignedFees {
+                fees: Eip1559Estimation {
+                    max_fee_per_gas: tx.max_fee_per_gas,
+                    max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
+                },
+                gas_limit: tx.gas_limit,
+            })
+        }
+        _ => None,
+    }
 }
 
 // Redaction guard: signing telemetry must record only allow-listed fields, never key
@@ -117,7 +150,7 @@ mod redaction_tests {
         let approval = PolicyApproval::mint(intent_hash, GasEnvelope::DEFAULT, u64::MAX);
         let tx = super::build_tx(&intent, 0, 21_000, crate::testutils::estimation(100, 1));
         // The instrumented sign path (`#[instrument(skip_all, fields(intent_hash))]`).
-        let _ = super::sign_encode(&signer, tx, intent_hash, &approval, 0)
+        let _signed = super::sign_encode(&signer, tx, intent_hash, &approval, 0)
             .await
             .expect("sign");
 

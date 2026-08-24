@@ -28,7 +28,6 @@ impl HandleId {
 /// before then re-tracks: `Mined`/`Replacing` fall back to `Sent`. This is the
 /// depth-gated finality of OZ Defender (12 confs) / thirdweb / Alchemy; `Replaced`
 /// on first sight would lose a tx whose nonce a reorg later frees.
-/// (`Dropped` arrives with the Send phase that can produce it.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum TxStatus {
@@ -51,6 +50,9 @@ pub enum TxStatus {
         reason: String,
     },
     Replaced,
+    /// We cancelled this tx: a self-send at its nonce evicted it. Terminal, distinct from
+    /// `Replaced` (a *foreign* tx taking the nonce).
+    Dropped,
 }
 
 impl TxStatus {
@@ -59,7 +61,7 @@ impl TxStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Confirmed { .. } | Self::Failed { .. } | Self::Replaced
+            Self::Confirmed { .. } | Self::Failed { .. } | Self::Replaced | Self::Dropped
         )
     }
 }
@@ -87,4 +89,7 @@ pub struct TxHandle {
     pub signed: Bytes,
     pub broadcasts: Vec<TxHash>,
     pub last_broadcast_at: u64,
+    /// Set by `cancel(id)`: its nonce being consumed settles the handle as `Dropped`.
+    #[serde(default)]
+    pub cancelled: bool,
 }

@@ -16,13 +16,16 @@ pub enum SigningRequest {
     /// signed message can never be a valid tx preimage (blind-signing guard, §5.2).
     Message(Bytes),
     TypedData(Box<TypedData>),
+    /// A cancel — a 0-value self-send at a stuck nonce. Carries the intent so the gate can
+    /// verify it is genuinely a self-send before default-allowing it.
+    Cancel(TxIntent),
 }
 
 impl SigningRequest {
     /// The 32-byte hash the approval binds and the signer signs.
     pub fn signing_hash(&self) -> Result<B256, SigningError> {
         match self {
-            Self::Transaction(intent) => Ok(intent.hash()),
+            Self::Transaction(intent) | Self::Cancel(intent) => Ok(intent.hash()),
             Self::Message(bytes) => Ok(eip191_hash_message(bytes)),
             Self::TypedData(td) => typed_data_hash(td),
         }

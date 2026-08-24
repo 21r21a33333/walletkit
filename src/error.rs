@@ -47,6 +47,9 @@ pub enum WalletKitError {
     Simulation { reason: String },
     #[error("signer {signer} does not control the intent account {intent}")]
     AccountMismatch { intent: Address, signer: Address },
+    /// A cancel could not proceed: the handle is unknown or already settled.
+    #[error("cannot cancel: {reason}")]
+    Cancel { reason: &'static str },
 }
 
 impl WalletKitError {
@@ -64,7 +67,8 @@ impl WalletKitError {
             | Self::Policy(_)
             | Self::PolicyEngine(_)
             | Self::Simulation { .. }
-            | Self::AccountMismatch { .. } => ErrorKind::Terminal,
+            | Self::AccountMismatch { .. }
+            | Self::Cancel { .. } => ErrorKind::Terminal,
         }
     }
 
@@ -97,6 +101,9 @@ impl WalletKitError {
             Self::Simulation { .. } => {
                 Some("the transaction would revert — inspect calldata and account state")
             }
+            Self::Cancel { .. } => {
+                Some("the transaction already settled or was never tracked — nothing to cancel")
+            }
             _ => None,
         }
     }
@@ -124,7 +131,7 @@ fn rpc_kind(e: &RpcError) -> ErrorKind {
 fn submission_kind(e: &SubmissionError) -> ErrorKind {
     if e.is_already_accepted() {
         ErrorKind::NeedsReconcile
-    } else if e.is_transient() {
+    } else if e.is_transient() || e.is_underpriced() {
         ErrorKind::Retryable
     } else {
         ErrorKind::Terminal
@@ -144,6 +151,12 @@ impl From<TransactionManagerError> for WalletKitError {
         match e {
             E::AccountMismatch { intent, signer } => Self::AccountMismatch { intent, signer },
             E::SimulationRejected { reason } => Self::Simulation { reason },
+            E::UnknownHandle => Self::Cancel {
+                reason: "no tracked transaction for this handle id",
+            },
+            E::CancelTerminal => Self::Cancel {
+                reason: "the transaction already settled",
+            },
             E::Denied(r) => Self::Policy(r),
             E::Rpc(e) => Self::Rpc(e),
             E::Gas(e) => Self::Gas(e),

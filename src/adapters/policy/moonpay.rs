@@ -108,13 +108,18 @@ impl MoonPayPolicyEngine {
 #[async_trait]
 impl PolicyEngine for MoonPayPolicyEngine {
     async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError> {
-        // This engine evaluates transactions only; other payloads are default-denied.
-        let SigningRequest::Transaction(intent) = request else {
-            return Ok(deny(
-                "unsupported-payload",
-                None,
-                "this engine evaluates transactions only".into(),
-            ));
+        // Evaluates transactions and self-send cancels (a stuck-tx safety valve, subject to
+        // the same rules as a tx); other payloads are default-denied.
+        let intent = match request {
+            SigningRequest::Transaction(i) => i,
+            SigningRequest::Cancel(i) if i.is_self_send() => i,
+            _ => {
+                return Ok(deny(
+                    "unsupported-payload",
+                    None,
+                    "this engine evaluates transactions and self-send cancels only".into(),
+                ));
+            }
         };
         let now = (self.now_unix)();
 
@@ -350,6 +355,31 @@ mod tests {
         assert!(matches!(
             engine.evaluate(&tx(1, to())).await,
             Err(PolicyEngineError::Eval(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn self_send_cancel_is_evaluated_like_a_tx() {
+        let engine = MoonPayPolicyEngine::new(
+            doc(json!([{ "type": "allowed_chains", "chain_ids": ["eip155:1"] }])),
+            None,
+        )
+        .unwrap();
+        // A self-send cancel (to == account == ZERO) rides the tx rules — allowed on eip155:1.
+        assert!(matches!(
+            engine
+                .evaluate(&SigningRequest::Cancel(intent(1, Address::ZERO)))
+                .await
+                .unwrap(),
+            Decision::Allow(_)
+        ));
+        // A non-self-send Cancel is not a real cancel — still default-denied.
+        assert!(matches!(
+            engine
+                .evaluate(&SigningRequest::Cancel(intent(1, to())))
+                .await
+                .unwrap(),
+            Decision::Deny(_)
         ));
     }
 }

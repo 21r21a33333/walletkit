@@ -42,4 +42,14 @@ impl SubmissionError {
             }
         }
     }
+
+    /// A replacement rejected as underpriced ("replacement transaction underpriced"): a
+    /// competing tx at this nonce out-bids ours. Retryable — re-price higher and resend.
+    pub fn is_underpriced(&self) -> bool {
+        match self {
+            Self::Rpc(RpcError::Call { message, .. }) => message
+                .to_ascii_lowercase()
+                .contains("replacement transaction underpriced"),
+        }
+    }
 }
