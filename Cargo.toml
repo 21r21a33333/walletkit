@@ -35,8 +35,15 @@ alloy-sol-types = "1"
 alloy-transport = { version = "2.4.1", features = ["throttle"] }
 alloy-transport-http = { version = "2.4.1", features = ["reqwest"] }
 async-trait = "0.1.92"
+# HD derivation for AccountManager: BIP-32 extended keys (`XPriv`/`XPub`) and BIP-39
+# mnemonics. Pinned to the versions alloy-signer-local uses to avoid duplicate trees;
+# English-only wordlist keeps the embedded word data small.
+coins-bip32 = "0.12"
+coins-bip39 = { version = "0.12", default-features = false, features = ["english"] }
 # poison-free locks — no `.lock().unwrap()` in production code.
 parking_lot = "0.12"
+# OS CSPRNG for fail-closed mnemonic entropy (matches coins-bip39's rand major).
+rand = "0.8"
 # Durable embedded StateStore backend (pure-Rust ACID KV); opt-in via the `redb` feature.
 redb = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"] }
