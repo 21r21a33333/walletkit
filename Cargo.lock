@@ -198,6 +198,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-ens"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be9aa797694e7c55b007aa8f172daef76a83272cbedb8800bdc7038eed3bdb1a"
+dependencies = [
+ "alloy-contract",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-sol-types",
+ "async-trait",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "alloy-genesis"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5763,6 +5777,7 @@ dependencies = [
  "alloy-contract",
  "alloy-dyn-abi",
  "alloy-eips",
+ "alloy-ens",
  "alloy-node-bindings",
  "alloy-primitives",
  "alloy-provider",

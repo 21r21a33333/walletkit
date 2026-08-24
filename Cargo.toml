@@ -19,6 +19,9 @@ alloy-contract = "2.4.1"
 # EIP-712 `TypedData`/`Eip712Domain` for the signing surface; reuse alloy's encoder.
 alloy-dyn-abi = { version = "1", features = ["eip712"] }
 alloy-eips = "2.4.1"
+# ENS resolution (namehash + registry/resolver reads) behind the `EnsResolver` port.
+# `provider` pulls in the `ProviderEnsExt` methods (+ `contract`, `EnsError`).
+alloy-ens = { version = "2.4.1", features = ["provider"] }
 # Deps are added per-consumer (see docs/plans): thiserror/tokio/async-trait/tracing
 # arrive with the ports and adapters that first use them, not up front.
 alloy-primitives = { version = "1", features = ["serde"] }

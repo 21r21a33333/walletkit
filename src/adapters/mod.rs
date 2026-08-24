@@ -2,6 +2,7 @@
 //! adapter; multi-file adapters ([`policy`], [`store`], [`transport`]) get a subdirectory.
 
 pub mod clock;
+pub mod ens;
 pub mod gas_oracle;
 pub mod nonce;
 pub mod policy;
@@ -15,6 +16,7 @@ pub mod transport;
 pub(crate) mod multicall;
 
 pub use clock::SystemClock;
+pub use ens::RpcEnsResolver;
 pub use gas_oracle::RpcGasOracle;
 pub use nonce::LocalNonceManager;
 pub use public_mempool::PublicMempool;

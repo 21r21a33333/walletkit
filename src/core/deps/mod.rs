@@ -4,6 +4,7 @@
 //! inventing its own.
 //!
 pub mod clock;
+pub mod ens;
 pub mod gas_oracle;
 pub mod nonce_manager;
 pub mod policy_engine;
@@ -14,6 +15,7 @@ pub mod state_store;
 pub mod submission;
 
 pub use clock::Clock;
+pub use ens::{EnsError, EnsResolver};
 pub use gas_oracle::{GasOracle, GasOracleError};
 pub use nonce_manager::{NonceManager, NonceManagerError};
 pub use policy_engine::{PolicyEngine, PolicyEngineError};
