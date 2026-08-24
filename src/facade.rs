@@ -61,6 +61,12 @@ impl Wallet {
         Ok(self.manager.send(intent).await?)
     }
 
+    /// Cancel a pending tx: a policy-gated 0-value self-send at its nonce (RBF). Errors if
+    /// the tx already settled. The original settles as `Dropped` once the cancel mines.
+    pub async fn cancel(&self, id: HandleId) -> Result<TxHandle, WalletKitError> {
+        Ok(self.manager.cancel(id).await?)
+    }
+
     /// Sign an EIP-191 `personal_sign` message (policy-gated; default-denied unless a rule
     /// allows message signing).
     pub async fn sign_message(&self, message: &[u8]) -> Result<SignatureEnvelope, WalletKitError> {

@@ -1,7 +1,5 @@
 use crate::core::deps::{Clock, PolicyEngine, PolicyEngineError};
-use crate::core::wallet::{
-    Decision, GasEnvelope, PolicyApproval, PolicyRejection, SigningRequest, TxIntent,
-};
+use crate::core::wallet::{Decision, GasEnvelope, PolicyApproval, PolicyRejection, SigningRequest};
 use alloy_primitives::{Address, TxKind, U256};
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -9,12 +7,6 @@ use std::sync::Arc;
 
 /// How long an approval stays valid for bumps (seconds).
 const DEFAULT_APPROVAL_TTL: u64 = 300;
-
-/// A genuine cancel shape: a 0-value self-send with empty calldata (EIP-2831 `tx_cancel`;
-/// viem/ethers' `cancelled` predicate). Only this may ride the default-allow cancel path.
-fn is_self_send(i: &TxIntent) -> bool {
-    i.to == TxKind::Call(i.account) && i.value.is_zero() && i.input.is_empty()
-}
 
 /// One native rule's verdict on a signing request. `Abstain` = "no opinion": a guard that
 /// only speaks up (`Deny`) when tripped and never grants `Allow`.
@@ -171,7 +163,7 @@ impl DefaultPolicyEngine {
         // A cancel (0-value self-send at a stuck nonce) default-allows even with no rule —
         // you must always be able to abort your own stuck tx. A rule `Deny` still vetoes it
         // above (deny-over-allow); a non-self-send can't ride this path.
-        let cancel_ok = matches!(request, SigningRequest::Cancel(i) if is_self_send(i));
+        let cancel_ok = matches!(request, SigningRequest::Cancel(i) if i.is_self_send());
         if !allowed && !cancel_ok {
             return Decision::Deny(PolicyRejection {
                 rule: "default-deny".into(),

@@ -69,6 +69,12 @@ These rules override default behavior and MUST be followed for every task.
   arrow-shaped nesting are a refactor smell — rewrite them.
 - **DRY** — no copy-pasted logic. Extract a shared function/type at the second use
   (build+sign+encode, CAS loops, error mapping, etc.); keep the API surface small.
+- **Named returns, not positional tuples.** A fn returning more than one typed value returns
+  a named `struct` (or a semantic type alias) — never a raw tuple of mixed types like
+  `(Eip1559Estimation, u64)` or `Result<(Bytes, TxHash), _>`. Call sites read `.fees` /
+  `.gas_limit`, never `.0` / `.1`. Applies to `Option<(…)>` and `Result<(…)>` too.
+  **Exceptions:** pairs of the same type where positional order is obvious (`(u64, u64)` for
+  two counts of the same thing), well-known idioms (`(K, V)` from a map iterator).
 
 ## Observability & error handling (standards set in the errors+observability phase)
 
