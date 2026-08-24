@@ -6,6 +6,8 @@ pub mod ens;
 pub mod gas_oracle;
 pub mod nonce;
 pub mod policy;
+#[cfg(feature = "pricing")]
+pub mod pricing;
 pub mod public_mempool;
 pub mod read;
 pub mod signers;
@@ -19,6 +21,8 @@ pub use clock::SystemClock;
 pub use ens::RpcEnsResolver;
 pub use gas_oracle::RpcGasOracle;
 pub use nonce::LocalNonceManager;
+#[cfg(feature = "pricing")]
+pub use pricing::{ChainlinkPrice, FeedConfig, TokenListSource};
 pub use public_mempool::PublicMempool;
 pub use read::RpcReadClient;
 pub use signers::LocalSigner;

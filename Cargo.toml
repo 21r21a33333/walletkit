@@ -68,6 +68,9 @@ tracing = ["dep:tracing"]
 redb = ["dep:redb"]
 postgres = ["dep:sqlx"]
 policy-moonpay = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:time"]
+# Opt-in token-metadata + price seam (token-list + Chainlink). Reuses deps already
+# present (serde/serde_json/alloy-contract); no new crates.
+pricing = []
 
 [dev-dependencies]
 alloy-node-bindings = "2.4.1"

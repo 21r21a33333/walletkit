@@ -45,6 +45,7 @@ pub trait ReadClient: Send + Sync {
 // a price `confidence`) can be added when a consumer needs them — grow, don't pre-commit.
 
 /// ERC-20 display metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Erc20Metadata {
     pub name: String,

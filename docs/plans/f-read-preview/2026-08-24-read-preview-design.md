@@ -15,7 +15,7 @@ Give consumers a read-only **view** of chain state and a pre-sign **simulation**
 - **`ReadClient`** — `chain_id`, `code`/`is_contract` (EOA-vs-contract, deployed check); native balance; ERC-20 balance/allowance/metadata; ERC-721/1155 ownership + balance for **known** contracts; a batched `balances(account, tokens)` (native + per-token) over **Multicall3 `aggregate3`** (per-call `Result`, so one reverting token can't nuke a portfolio scan). Modeled on viem's `PublicClient`. Metadata reads fall back `string`→`bytes32` for non-standard tokens (MKR/DAI); `balances` chunks large lists to stay under node calldata/gas caps and takes an overridable Multicall3 address.
 - **`dry_run` → `TxPreview`** — gas estimate, success/revert with a **decoded reason**, EIP-2930 access list, raw return data. RPC-only via `eth_call` + `eth_estimateGas` + `eth_createAccessList` (alloy exposes `create_access_list` natively; viem/ethers don't). Gas is **advisory** — a dry-run is a lower bound.
 - **`EnsResolver`** — resolve / reverse / text / avatar over the ENS Universal Resolver (`eth_call`).
-- **Enrichment (opt-in ports; the RPC-compatible adapters ship, so core carries no vendor dependency):** `TokenMetadataSource` ← a Uniswap **token-list** adapter; `PriceSource` ← a **Chainlink** `latestRoundData` adapter. Feature `enrich`.
+- **Enrichment (opt-in ports; the RPC-compatible adapters ship, so core carries no vendor dependency):** `TokenMetadataSource` ← a Uniswap **token-list** adapter; `PriceSource` ← a **Chainlink** `latestRoundData` adapter. Feature `pricing`.
 
 **Out — deferred, but designed to slot into the same seams:**
 
@@ -34,7 +34,7 @@ Three small object-safe read ports + concrete adapters, plus one opt-in enrichme
 - `adapters/read.rs` — `RpcReadClient` over the **same resilient alloy provider `Transport` builds** (so reads inherit its failover/retry/hedge; `Transport` exposes a cheap `DynProvider` clone or a `read_client()` constructor); `sol!` ERC-20/721/1155 bindings + `MulticallBuilder`.
 - `core/wallet/preview.rs` — the `TxPreview` type + `dry_run` orchestration; `Rpc` gains `call` + `create_access_list`; `Transport` implements them.
 - `core/deps/ens.rs` — `EnsResolver` trait + `EnsError`; `adapters/ens.rs` — Universal-Resolver adapter.
-- `core/deps/enrich.rs` — `TokenMetadataSource`, `PriceSource` traits + errors; `adapters/enrich/{token_list,chainlink}.rs` behind feature `enrich`.
+- `core/deps/pricing.rs` — `TokenMetadataSource`, `PriceSource` traits + errors; `adapters/pricing/{token_list,chainlink}.rs` behind feature `pricing`.
 - `facade.rs` — construction: `ReadClient`/`EnsResolver` are standalone (built from a `Transport`, **not** tied to the wallet's single account, since reads target arbitrary addresses); `Wallet::dry_run(&intent)` is a convenience over the wallet's chain.
 
 ## Components
@@ -127,23 +127,23 @@ Adapter notes baked in (correctness the underlying `alloy-ens` binding does **no
 - **CCIP-Read (EIP-3668) is deferred, strict-RPC is the default.** `alloy-ens` forward resolution routes through the Universal Resolver (so ENSIP-10 wildcard is free) but does **not** follow the `OffchainLookup` revert — offchain/L2 names (Basenames `*.base.eth`, `*.cb.id`, L2 subnames) therefore do **not** resolve yet. Surface that distinctly as `EnsError::OffchainLookupRequired { .. }` (not a generic failure) so callers can detect it and opt into a future CCIP feature (an HTTP gateway hop is a new trust boundary — feature-gated, never silent).
 - `avatar` returns the raw text record (`Option<String>`); typed NFT-avatar (ENSIP-12 `eip155:` + ownership check) resolution is a deferred, separately-named method to avoid a breaking return-type change.
 
-### Enrichment seam (opt-in, feature `enrich`)
+### Pricing seam (opt-in, feature `pricing`)
 
 Two independent ports the core never calls; a caller composes them in. Core stays vendor-free.
 
 ```rust
 #[async_trait]
 pub trait TokenMetadataSource: Send + Sync {
-    async fn metadata(&self, chain_id: u64, token: Address) -> Result<Option<Erc20Metadata>, EnrichError>;
+    async fn metadata(&self, chain_id: u64, token: Address) -> Result<Option<Erc20Metadata>, PricingError>;
 }
 #[async_trait]
 pub trait PriceSource: Send + Sync {
-    async fn price(&self, chain_id: u64, token: Address, vs: Currency) -> Result<Option<Price>, EnrichError>;
+    async fn price(&self, chain_id: u64, token: Address, vs: Currency) -> Result<Option<Price>, PricingError>;
 }
 ```
 
 - **`TokenListSource`** (adapter) — loads a Uniswap-schema token-list JSON (HTTPS/IPFS), builds an in-memory `(chain_id, address) → Erc20Metadata` map; **no RPC at read time**. Core's on-chain `erc20_metadata` fills gaps the list misses.
-- **`ChainlinkPrice`** (adapter) — `AggregatorV3Interface.latestRoundData()` normalized by the feed's own `decimals()`; **pure RPC** (needs only the feed address per pair/chain), so a "no third-party APIs" deployment still gets prices. **Staleness is per-feed, not a single global constant** — heartbeats vary widely (ETH/USD is 3600s on mainnet but 86400s on Arbitrum), so config is a `(chain_id, feed) → heartbeat` map plus a small grace, checked against an injected `Clock` (no ambient time). Every round is validated: `answer > 0`, `updatedAt != 0 && updatedAt <= now`, `roundId != 0`; deprecated `answeredInRound`/`latestAnswer` are not used. A stale feed returns `EnrichError::Stale`, a missing feed returns `Ok(None)`. CoinGecko/Pyth are the *same* `PriceSource` trait, deferred (Pyth's confidence band maps to a future `#[non_exhaustive]` `Price` field).
+- **`ChainlinkPrice`** (adapter) — `AggregatorV3Interface.latestRoundData()` normalized by the feed's own `decimals()`; **pure RPC** (needs only the feed address per pair/chain), so a "no third-party APIs" deployment still gets prices. **Staleness is per-feed, not a single global constant** — heartbeats vary widely (ETH/USD is 3600s on mainnet but 86400s on Arbitrum), so config is a `(chain_id, feed) → heartbeat` map plus a small grace, checked against an injected `Clock` (no ambient time). Every round is validated: `answer > 0`, `updatedAt != 0 && updatedAt <= now`, `roundId != 0`; deprecated `answeredInRound`/`latestAnswer` are not used. A stale feed returns `PricingError::Stale`, a missing feed returns `Ok(None)`. CoinGecko/Pyth are the *same* `PriceSource` trait, deferred (Pyth's confidence band maps to a future `#[non_exhaustive]` `Price` field).
 
 ## Data flow
 
@@ -161,7 +161,7 @@ Preview:  wallet.dry_run(&intent)
 
 ## Error handling
 
-- One `{Trait}Error` per port (`ReadError`, `EnsError`, `EnrichError`), `thiserror`, `#[non_exhaustive]` — each wraps `RpcError` (transient/terminal already classified there) plus its own decode variants (e.g. `ReadError::Decode` for a malformed on-chain response; `EnrichError::List` for a bad token-list).
+- One `{Trait}Error` per port (`ReadError`, `EnsError`, `PricingError`), `thiserror`, `#[non_exhaustive]` — each wraps `RpcError` (transient/terminal already classified there) plus its own decode variants (e.g. `ReadError::Decode` for a malformed on-chain response; `PricingError::List` for a bad token-list).
 - Public read/preview methods on `Wallet` return `WalletKitError`; add `Read`/`Ens`/`Preview` variants classified in `kind()` (`RpcError` drives Retryable/Terminal). A **revert in a preview is not an error** — it's a `TxPreview` with `SimOutcome::Revert`.
 - `dry_run` reuses the send pipeline's `TransactionRequest` build; no new tx mechanics.
 
@@ -174,7 +174,7 @@ Preview:  wallet.dry_run(&intent)
 
 ## Files touched
 
-`core/deps/{read,ens,enrich}.rs` (ports + errors) · `adapters/{read,ens}.rs` + `adapters/enrich/{token_list,chainlink}.rs` · `core/wallet/preview.rs` (`TxPreview`, `dry_run`) · `core/deps/rpc.rs` + `adapters/transport/mod.rs` (`call`, `create_access_list`) · `facade.rs` (`Wallet::dry_run`, `ReadClient`/`EnsResolver` wiring) · `error.rs` (`Read`/`Ens`/`Preview` variants + `kind()`) · `Cargo.toml` (feature `enrich`).
+`core/deps/{read,ens,enrich}.rs` (ports + errors) · `adapters/{read,ens}.rs` + `adapters/pricing/{token_list,chainlink}.rs` · `core/wallet/preview.rs` (`TxPreview`, `dry_run`) · `core/deps/rpc.rs` + `adapters/transport/mod.rs` (`call`, `create_access_list`) · `facade.rs` (`Wallet::dry_run`, `ReadClient`/`EnsResolver` wiring) · `error.rs` (`Read`/`Ens`/`Preview` variants + `kind()`) · `Cargo.toml` (feature `pricing`).
 
 ## Prior art & research (cited)
 
@@ -197,7 +197,7 @@ A 4-agent survey of read/preview/enrichment surfaces across viem/ethers/alloy/wa
 1. **Core is RPC-only and vendor-free.** A read is core iff the contract address is known; discovery/enumeration/vendor-portfolio is a deferred indexer seam.
 2. **Multicall3 `aggregate3` (per-call `Result`) is the batch default** — one reverting token can't fail an overview; native balance rides inside the aggregate.
 3. **`TxPreview` is RPC-only** (`eth_call` + `eth_estimateGas` + `eth_createAccessList`); asset/balance **deltas**, USD, and traces are a deferred `AssetPreview` seam. Gas is advisory. A revert is a *successful preview* with a `Revert` outcome, not an error.
-4. **Enrichment ships only its RPC-compatible adapters** (token-list metadata, Chainlink price) behind feature `enrich`; vendor adapters (Alchemy/Tenderly/CoinGecko) are the same ports, deferred.
+4. **Enrichment ships only its RPC-compatible adapters** (token-list metadata, Chainlink price) behind feature `pricing`; vendor adapters (Alchemy/Tenderly/CoinGecko) are the same ports, deferred.
 5. **ENS is its own small port** (four verbs), plain-RPC; offchain CCIP-Read behind a flag.
 6. **Reads are standalone**, not bound to the wallet's single account (they target arbitrary addresses); `Wallet::dry_run` is a convenience over the wallet's chain.
 7. **`ReadClient` reuses `Transport`'s resilient provider** (failover/retry/hedge from sub-project 0), never a naive single endpoint — the read path gets the same reliability as the write path for free.

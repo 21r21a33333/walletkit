@@ -21,7 +21,7 @@ Every task's requirements implicitly include these (from CLAUDE.md + the approve
 - **Observability:** import `use crate::obs::{...}` and call bare; spans via `#[cfg_attr(feature = "tracing", tracing::instrument(...))]`. Build stays green **with and without** `--no-default-features`.
 - **Comments = why-not-what**, short, minimal; no dev-process breadcrumbs (no task/phase numbers, no history narration, no future-promises). The pre-commit hook (`.githooks/pre-commit`) enforces this.
 - **Tests earn their place:** no serde/struct-init/trait-plumbing tests; test only logic that can regress (multicall failure-isolation, revert decode, reverse-verify, price scale/staleness, token-list fallback). Adapter integration tests run against embedded anvil and **skip cleanly** when anvil is absent.
-- **Locked design decisions (approved spec):** core is RPC-only and vendor-free; Multicall3 `aggregate3` per-call `Result` is the batch default with native balance folded in (one RPC); `TxPreview` is RPC-only and gas is advisory; enrichment ships only its RPC-compatible adapters behind feature `enrich`; reads are standalone; `ReadClient`/`EnsResolver` reuse `Transport`'s resilient provider.
+- **Locked design decisions (approved spec):** core is RPC-only and vendor-free; Multicall3 `aggregate3` per-call `Result` is the batch default with native balance folded in (one RPC); `TxPreview` is RPC-only and gas is advisory; enrichment ships only its RPC-compatible adapters behind feature `pricing`; reads are standalone; `ReadClient`/`EnsResolver` reuse `Transport`'s resilient provider.
 
 ---
 
@@ -29,7 +29,7 @@ Every task's requirements implicitly include these (from CLAUDE.md + the approve
 
 | File | Responsibility | Task |
 | --- | --- | --- |
-| `Cargo.toml` | add `alloy-contract`, `alloy-sol-types`, `alloy-ens`; feature `enrich` | 1, 5 |
+| `Cargo.toml` | add `alloy-contract`, `alloy-sol-types`, `alloy-ens`; feature `pricing` | 1, 5 |
 | `tests/support/mod.rs` | `deploy_mock_erc20` + `send_tx` helpers; `MockErc20` `sol!` | 1 |
 | `tests/support/mock_erc20.bin` | committed creation bytecode fixture | 1 |
 | `src/core/deps/read.rs` | `ReadClient` port + `ReadError`, `Erc20Metadata`, `AccountBalances` | 1 |
@@ -40,8 +40,8 @@ Every task's requirements implicitly include these (from CLAUDE.md + the approve
 | `src/facade.rs` | `Wallet::dry_run` | 3 |
 | `src/core/deps/ens.rs` | `EnsResolver` port + `EnsError` | 4 |
 | `src/adapters/ens.rs` | `RpcEnsResolver` over `alloy-ens` `ProviderEnsExt` | 4 |
-| `src/core/deps/enrich.rs` | `TokenMetadataSource`, `PriceSource` ports + `EnrichError`, `Price`, `Currency` | 5 |
-| `src/adapters/enrich/mod.rs`, `token_list.rs`, `chainlink.rs` | enrichment adapters (feature `enrich`) | 5 |
+| `src/core/deps/pricing.rs` | `TokenMetadataSource`, `PriceSource` ports + `PricingError`, `Price`, `Currency` | 5 |
+| `src/adapters/pricing/mod.rs`, `token_list.rs`, `chainlink.rs` | enrichment adapters (feature `pricing`) | 5 |
 | `src/error.rs` | `WalletKitError::{Read, Ens}` + `From` + `kind()` | 1, 4 |
 | `src/core/deps/mod.rs`, `src/adapters/mod.rs`, `src/lib.rs`, `src/core/wallet/mod.rs` | module wiring + re-exports | 1–5 |
 
@@ -1120,32 +1120,32 @@ git commit -m "feat(ens): EnsResolver port + RpcEnsResolver adapter (forward-ver
 
 ---
 
-### Task 5: Enrichment seam — `TokenMetadataSource` + `PriceSource` (feature `enrich`)
+### Task 5: Pricing seam — `TokenMetadataSource` + `PriceSource` (feature `pricing`)
 
 **Files:**
-- Modify: `Cargo.toml` (feature `enrich`)
-- Create: `src/core/deps/enrich.rs` (ports; gated)
-- Create: `src/adapters/enrich/mod.rs`, `src/adapters/enrich/token_list.rs`, `src/adapters/enrich/chainlink.rs`
+- Modify: `Cargo.toml` (feature `pricing`)
+- Create: `src/core/deps/pricing.rs` (ports; gated)
+- Create: `src/adapters/pricing/mod.rs`, `src/adapters/pricing/token_list.rs`, `src/adapters/pricing/chainlink.rs`
 - Modify: `src/core/deps/mod.rs`, `src/adapters/mod.rs` (gated wiring)
 
 **Interfaces:**
 - Consumes: `Erc20Metadata` (Task 1), `DynProvider`, `alloy-contract` (`#[sol(rpc)]` `AggregatorV3Interface`).
 - Produces (all behind `#[cfg(feature = "enrich")]`):
-  - `trait TokenMetadataSource: Send + Sync` — `metadata(chain_id, token) -> Result<Option<Erc20Metadata>, EnrichError>`
-  - `trait PriceSource: Send + Sync` — `price(chain_id, token, vs: Currency) -> Result<Option<Price>, EnrichError>`
+  - `trait TokenMetadataSource: Send + Sync` — `metadata(chain_id, token) -> Result<Option<Erc20Metadata>, PricingError>`
+  - `trait PriceSource: Send + Sync` — `price(chain_id, token, vs: Currency) -> Result<Option<Price>, PricingError>`
   - `struct Price { value: U256, decimals: u8, updated_at: u64 }`, `enum Currency { Usd }`
-  - `enum EnrichError` (`Rpc`, `List { detail: String }`, `Stale { age_secs: u64 }`)
-  - `TokenListSource::from_json(bytes: &[u8]) -> Result<Self, EnrichError>` + `TokenListSource::with_fallback(read: Arc<dyn ReadClient>)` (on-chain gap fill, bytes32-tolerant via `ReadClient::erc20_metadata`)
+  - `enum PricingError` (`Rpc`, `List { detail: String }`, `Stale { age_secs: u64 }`)
+  - `TokenListSource::from_json(bytes: &[u8]) -> Result<Self, PricingError>` + `TokenListSource::with_fallback(read: Arc<dyn ReadClient>)` (on-chain gap fill, bytes32-tolerant via `ReadClient::erc20_metadata`)
   - `struct FeedConfig { address: Address, heartbeat_secs: u64 }`
   - `ChainlinkPrice::new(provider: DynProvider, clock: Arc<dyn Clock>, feeds: HashMap<(u64, Address), FeedConfig>, grace_secs: u64)` — **staleness is per-feed heartbeat + grace, not a global constant** (heartbeats vary 3600s↔86400s per feed/chain); `now` comes from the injected `Clock` (no ambient time).
 
 - [ ] **Step 1: Add the feature**
 
-`Cargo.toml` `[features]`: `enrich = []` (no new deps — token-list uses `serde_json` already present; Chainlink uses `alloy-contract` added in Task 1). Add `enrich` to a CI matrix note but **not** to `default`.
+`Cargo.toml` `[features]`: `enrich = []` (no new deps — token-list uses `serde_json` already present; Chainlink uses `alloy-contract` added in Task 1). Add `pricing` to a CI matrix note but **not** to `default`.
 
 - [ ] **Step 2: Write the ports (gated)**
 
-Create `src/core/deps/enrich.rs`. Gate the whole module so a no-`enrich` build compiles nothing here:
+Create `src/core/deps/pricing.rs`. Gate the whole module so a no-`pricing` build compiles nothing here:
 
 ```rust
 use crate::core::deps::{Erc20Metadata, RpcError, ReadClient};
@@ -1160,7 +1160,7 @@ pub trait TokenMetadataSource: Send + Sync {
         &self,
         chain_id: u64,
         token: Address,
-    ) -> Result<Option<Erc20Metadata>, EnrichError>;
+    ) -> Result<Option<Erc20Metadata>, PricingError>;
 }
 
 /// A price feed for a token in a quote currency. RPC-compatible adapters (Chainlink)
@@ -1172,7 +1172,7 @@ pub trait PriceSource: Send + Sync {
         chain_id: u64,
         token: Address,
         vs: Currency,
-    ) -> Result<Option<Price>, EnrichError>;
+    ) -> Result<Option<Price>, PricingError>;
 }
 
 pub struct Price {
@@ -1188,7 +1188,7 @@ pub enum Currency {
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum EnrichError {
+pub enum PricingError {
     #[error(transparent)]
     Rpc(RpcError),
     #[error("token list error: {detail}")]
@@ -1204,7 +1204,7 @@ Gate in `src/core/deps/mod.rs`: `#[cfg(feature = "enrich")] pub mod enrich;` + g
 
 - [ ] **Step 3: Token-list adapter + unit test (parse + lookup + on-chain fallback)**
 
-Create `src/adapters/enrich/token_list.rs`. The list is a Uniswap-schema JSON; parse once into a `(chain_id, address) → Erc20Metadata` map (no RPC at read time). If a token is missing and a `ReadClient` fallback is configured, fill from chain.
+Create `src/adapters/pricing/token_list.rs`. The list is a Uniswap-schema JSON; parse once into a `(chain_id, address) → Erc20Metadata` map (no RPC at read time). If a token is missing and a `ReadClient` fallback is configured, fill from chain.
 
 Write the failing unit test first (pure logic — parse + fallback path):
 
@@ -1225,11 +1225,11 @@ mod tests {
 }
 ```
 
-Implement: `#[derive(Deserialize)]` for the list entry (`chainId`, `address`, `name`, `symbol`, `decimals`), build a `HashMap<(u64, Address), Erc20Metadata>`, `from_json` maps serde errors to `EnrichError::List`. `metadata()` returns the map hit; on a miss with a configured `ReadClient`, call `read.erc20_metadata(token)` and map `ReadError` → `EnrichError::Rpc`/`List`. The `lookup` sync helper (used by the test) is the pure core; `metadata` wraps it with the async fallback. Keep the on-chain fallback out of the unit test (it needs a provider) — the map lookup is the regression-worthy logic.
+Implement: `#[derive(Deserialize)]` for the list entry (`chainId`, `address`, `name`, `symbol`, `decimals`), build a `HashMap<(u64, Address), Erc20Metadata>`, `from_json` maps serde errors to `PricingError::List`. `metadata()` returns the map hit; on a miss with a configured `ReadClient`, call `read.erc20_metadata(token)` and map `ReadError` → `PricingError::Rpc`/`List`. The `lookup` sync helper (used by the test) is the pure core; `metadata` wraps it with the async fallback. Keep the on-chain fallback out of the unit test (it needs a provider) — the map lookup is the regression-worthy logic.
 
 - [ ] **Step 4: Chainlink adapter + unit test (scale + staleness — pure math)**
 
-Create `src/adapters/enrich/chainlink.rs`. `sol!(#[sol(rpc)] AggregatorV3Interface { latestRoundData() → (uint80,int256,uint256,uint256,uint80); decimals() → uint8; })`. `price()` looks up the feed address for `(chain_id, token)`, reads `latestRoundData` + `decimals`, and applies **pure** scale/staleness logic. Extract that logic into a free fn and unit-test it (no provider needed):
+Create `src/adapters/pricing/chainlink.rs`. `sol!(#[sol(rpc)] AggregatorV3Interface { latestRoundData() → (uint80,int256,uint256,uint256,uint80); decimals() → uint8; })`. `price()` looks up the feed address for `(chain_id, token)`, reads `latestRoundData` + `decimals`, and applies **pure** scale/staleness logic. Extract that logic into a free fn and unit-test it (no provider needed):
 
 ```rust
 use alloy_primitives::{I256, U256};
@@ -1241,20 +1241,20 @@ struct Round { round_id: U256, answer: I256, updated_at: u64 }
 /// round (non-zero round, sane timestamps, positive answer) and enforces the FEED's own
 /// heartbeat + grace — not a single global max-age (heartbeats vary widely per feed/chain).
 fn to_price(round: Round, decimals: u8, now: u64, heartbeat_secs: u64, grace_secs: u64)
-    -> Result<Price, EnrichError>
+    -> Result<Price, PricingError>
 {
     if round.round_id.is_zero() || round.updated_at == 0 || round.updated_at > now {
-        return Err(EnrichError::Feed { detail: "invalid round".into() });
+        return Err(PricingError::Feed { detail: "invalid round".into() });
     }
     // A non-positive answer is a feed fault (stale/misconfigured), not a real price.
     if round.answer <= I256::ZERO {
-        return Err(EnrichError::Feed { detail: "non-positive price".into() });
+        return Err(PricingError::Feed { detail: "non-positive price".into() });
     }
     let age = now - round.updated_at;
     if age > heartbeat_secs.saturating_add(grace_secs) {
-        return Err(EnrichError::Stale { age_secs: age });
+        return Err(PricingError::Stale { age_secs: age });
     }
-    let value = U256::try_from(round.answer).map_err(|_| EnrichError::Feed { detail: "price overflow".into() })?;
+    let value = U256::try_from(round.answer).map_err(|_| PricingError::Feed { detail: "price overflow".into() })?;
     Ok(Price { value, decimals, updated_at: round.updated_at })
 }
 
@@ -1270,27 +1270,27 @@ mod tests {
         let p = to_price(round(200_000_000_000, 1_000), 8, 1_030, 3_600, 60).unwrap();
         assert_eq!((p.value, p.decimals), (U256::from(200_000_000_000u64), 8));
         // Stale: age 4000s > 3600 + 60.
-        assert!(matches!(to_price(round(1, 1_000), 8, 5_000, 3_600, 60), Err(EnrichError::Stale { .. })));
+        assert!(matches!(to_price(round(1, 1_000), 8, 5_000, 3_600, 60), Err(PricingError::Stale { .. })));
         // Non-positive answer rejected.
-        assert!(matches!(to_price(round(0, 1_000), 8, 1_030, 3_600, 60), Err(EnrichError::Feed { .. })));
+        assert!(matches!(to_price(round(0, 1_000), 8, 1_030, 3_600, 60), Err(PricingError::Feed { .. })));
         // Future/zero timestamp rejected.
-        assert!(matches!(to_price(round(1, 0), 8, 1_030, 3_600, 60), Err(EnrichError::Feed { .. })));
+        assert!(matches!(to_price(round(1, 0), 8, 1_030, 3_600, 60), Err(PricingError::Feed { .. })));
     }
 }
 ```
 
-`price()` (async) reads `latestRoundData` + `decimals` via the contract instance, packs them into `Round`, looks up the `(chain_id, token) → FeedConfig`, and delegates to `to_price` with `now` from the injected `Clock` (reuse `core::deps::Clock` — never call `SystemTime` directly) and the feed's `heartbeat_secs`. A missing feed → `Ok(None)`; a stale/invalid round → `Err`. Map contract errors to `EnrichError::Rpc`. Do NOT use the deprecated `answeredInRound`/`latestAnswer`.
+`price()` (async) reads `latestRoundData` + `decimals` via the contract instance, packs them into `Round`, looks up the `(chain_id, token) → FeedConfig`, and delegates to `to_price` with `now` from the injected `Clock` (reuse `core::deps::Clock` — never call `SystemTime` directly) and the feed's `heartbeat_secs`. A missing feed → `Ok(None)`; a stale/invalid round → `Err`. Map contract errors to `PricingError::Rpc`. Do NOT use the deprecated `answeredInRound`/`latestAnswer`.
 
 > Confirm `alloy_primitives::I256`, `I256::ZERO`, and `U256::try_from(I256)`; if `try_from` is absent, guard `answer.is_negative()` then `answer.into_raw()`. `roundId` is `uint80` on-chain — decode into `U256` and check `is_zero()`.
 
 - [ ] **Step 5: Adapter module wiring**
 
-`src/adapters/enrich/mod.rs`: `pub mod token_list; pub mod chainlink; pub use token_list::TokenListSource; pub use chainlink::ChainlinkPrice;`. In `src/adapters/mod.rs`: `#[cfg(feature = "enrich")] pub mod enrich;` + gated re-exports.
+`src/adapters/pricing/mod.rs`: `pub mod token_list; pub mod chainlink; pub use token_list::TokenListSource; pub use chainlink::ChainlinkPrice;`. In `src/adapters/mod.rs`: `#[cfg(feature = "enrich")] pub mod enrich;` + gated re-exports.
 
 - [ ] **Step 6: Run the unit tests**
 
 Run: `cargo test --features enrich enrich` and `cargo test --features enrich token_list`/`chainlink`.
-Expected: the two pure-logic tests PASS. Also confirm `cargo build` (no `enrich`) compiles nothing new, and `cargo build --features enrich` is clean.
+Expected: the two pure-logic tests PASS. Also confirm `cargo build` (no `pricing`) compiles nothing new, and `cargo build --features enrich` is clean.
 
 - [ ] **Step 7: Full gate + report**, including the feature permutations:
 ```
@@ -1303,7 +1303,7 @@ cargo test --features enrich
 - [ ] **Step 8: Commit (after approval)**
 
 ```bash
-git add Cargo.toml Cargo.lock src/core/deps/enrich.rs src/adapters/enrich/ src/core/deps/mod.rs src/adapters/mod.rs
+git add Cargo.toml Cargo.lock src/core/deps/pricing.rs src/adapters/pricing/ src/core/deps/mod.rs src/adapters/mod.rs
 git commit -m "feat(enrich): TokenMetadataSource + PriceSource seam (token-list, Chainlink) behind feature enrich"
 ```
 
@@ -1319,7 +1319,7 @@ git commit -m "feat(enrich): TokenMetadataSource + PriceSource seam (token-list,
 
 - [ ] **Step 1: Update README**
 
-Add a short "Reading & previewing" subsection: `ReadClient` (balances/metadata/allowance, Multicall3-batched), `Wallet::dry_run` → `TxPreview`, `EnsResolver`, and the opt-in `enrich` feature (token-list metadata + Chainlink prices). One example: build a `Transport`, `RpcReadClient::new(transport.provider())`, `read.balances(account, &[usdc, dai])`. Mark F1 in the status table.
+Add a short "Reading & previewing" subsection: `ReadClient` (balances/metadata/allowance, Multicall3-batched), `Wallet::dry_run` → `TxPreview`, `EnsResolver`, and the opt-in `pricing` feature (token-list metadata + Chainlink prices). One example: build a `Transport`, `RpcReadClient::new(transport.provider())`, `read.balances(account, &[usdc, dai])`. Mark F1 in the status table.
 
 - [ ] **Step 2: Doctest/compile check**
 
@@ -1342,7 +1342,7 @@ git commit -m "docs(read-preview): document ReadClient, dry_run, ENS, and the en
 - ✅ `ReadClient` (native/ERC-20/721/1155 known-contract reads + Multicall3 `aggregate3` `balances` with per-token `Result`) → Task 1.
 - ✅ `TxPreview`/`dry_run` (eth_call + estimate_gas + create_access_list; decoded `RevertReason`; revert-is-not-error; gas advisory) → Tasks 2–3.
 - ✅ `EnsResolver` (4 verbs; reverse forward-verify; CCIP not followed = strict RPC) → Task 4, via `alloy-ens` (registry-based; a **deliberate reuse deviation** from the spec's "Universal Resolver" wording — same 4-verb surface, no hand-rolled namehash/encoding; note in the PR).
-- ✅ Enrichment seam (`TokenMetadataSource`←token-list, `PriceSource`←Chainlink, feature `enrich`, vendor adapters deferred) → Task 5.
+- ✅ Pricing seam (`TokenMetadataSource`←token-list, `PriceSource`←Chainlink, feature `pricing`, vendor adapters deferred) → Task 5.
 - ✅ Reads standalone; `ReadClient`/ENS reuse `Transport`'s resilient provider (`Transport::provider()`) → Tasks 1, 4.
 - ✅ One public error type: `WalletKitError::{Read, Ens}` + `kind()`; preview reuses `Rpc` (no gratuitous variant) → Tasks 1, 3, 4.
 - ✅ Deferred items (token/NFT discovery, asset-delta preview, vendor adapters, traces) are **not** implemented and the ports are shaped to admit them later.
@@ -1352,7 +1352,7 @@ git commit -m "docs(read-preview): document ReadClient, dry_run, ENS, and the en
 **Type consistency:** `ReadClient`/`Erc20Metadata`/`AccountBalances`/`TokenBalance`/`ReadError` are defined in Task 1 and consumed by Task 5's fallback; `Simulated` (Task 2) is consumed by `dry_run` (Task 3); `TxPreview`/`SimOutcome`/`RevertReason` names are stable across Task 3; `Transport::provider()` (Task 1) is reused by Tasks 4–5. `decode_revert` free fn name matches its test.
 
 **Research-pass deltas folded in (2026-08-24, "lean + minimal reads" scope):**
-- **Correctness (non-optional):** bytes32 metadata fallback (`decode_str`); `balances` chunking + result-length guard + overridable Multicall3; Chainlink per-feed staleness (`FeedConfig.heartbeat_secs` + grace) + round validation (`EnrichError::Feed`); ENS name-normalization note + typed `EnsError::OffchainLookupRequired`; `#[non_exhaustive]` on returned structs/enums.
+- **Correctness (non-optional):** bytes32 metadata fallback (`decode_str`); `balances` chunking + result-length guard + overridable Multicall3; Chainlink per-feed staleness (`FeedConfig.heartbeat_secs` + grace) + round validation (`PricingError::Feed`); ENS name-normalization note + typed `EnsError::OffchainLookupRequired`; `#[non_exhaustive]` on returned structs/enums.
 - **Minimal reads added:** `ReadClient::{chain_id, code, is_contract}`.
 - **Deferred (behind `#[non_exhaustive]`/seams, per YAGNI):** preview `state_overrides`/`pending`/`block`; fee/total-fee reads; local ABI `decode_call`; NFT metadata URIs; unlimited-approval detector; EIP-1271/6492 + `predict_address`/HD (→F2); `dry_run_many` bundles; asset-delta/log/trace preview; vendor adapters; multi-source prices/TWAP/Pyth; avatar-NFT resolution; token-list refresh; CCIP-Read.
 
