@@ -9,7 +9,8 @@ use crate::adapters::{
 };
 use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use crate::core::wallet::{
-    AccountExecutor, HandleId, SignatureEnvelope, TransactionManager, TxHandle, TxIntent, TxStatus,
+    AccountExecutor, HandleId, SignatureEnvelope, TransactionManager, TxHandle, TxIntent,
+    TxPreview, TxStatus, dry_run,
 };
 use crate::error::WalletKitError;
 use alloy_dyn_abi::TypedData;
@@ -25,6 +26,7 @@ pub struct Wallet {
     manager: Arc<TransactionManager>,
     executor: AccountExecutor,
     store: Arc<dyn StateStore>,
+    rpc: Arc<dyn Rpc>,
     account: Address,
 }
 
@@ -66,6 +68,15 @@ impl Wallet {
     /// the tx already settled. The original settles as `Dropped` once the cancel mines.
     pub async fn cancel(&self, id: HandleId) -> Result<TxHandle, WalletKitError> {
         Ok(self.manager.cancel(id).await?)
+    }
+
+    /// Simulate an intent without signing or broadcasting: gas (advisory), success or a
+    /// decoded revert reason, access list, and return data. A would-revert tx yields a
+    /// [`TxPreview`] with a `Revert` outcome — not an error. Never touches the store.
+    pub async fn dry_run(&self, intent: &TxIntent) -> Result<TxPreview, WalletKitError> {
+        dry_run(self.rpc.as_ref(), intent)
+            .await
+            .map_err(WalletKitError::Rpc)
     }
 
     /// Sign an EIP-191 `personal_sign` message (policy-gated; default-denied unless a rule
@@ -225,7 +236,7 @@ impl WalletBuilder {
         let manager = Arc::new(manager);
 
         let mut executor = AccountExecutor::new(
-            self.rpc,
+            self.rpc.clone(),
             nonce_manager,
             submission,
             store.clone(),
@@ -249,6 +260,7 @@ impl WalletBuilder {
             manager,
             executor,
             store,
+            rpc: self.rpc,
             account,
         }
     }
