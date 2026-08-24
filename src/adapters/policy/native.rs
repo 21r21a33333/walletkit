@@ -160,9 +160,8 @@ impl DefaultPolicyEngine {
                 Verdict::Abstain => {}
             }
         }
-        // A cancel (0-value self-send at a stuck nonce) default-allows even with no rule —
-        // you must always be able to abort your own stuck tx. A rule `Deny` still vetoes it
-        // above (deny-over-allow); a non-self-send can't ride this path.
+        // A self-send cancel default-allows even with no rule (you must be able to abort
+        // your own tx); a rule `Deny` still short-circuits above.
         let cancel_ok = matches!(request, SigningRequest::Cancel(i) if i.is_self_send());
         if !allowed && !cancel_ok {
             return Decision::Deny(PolicyRejection {

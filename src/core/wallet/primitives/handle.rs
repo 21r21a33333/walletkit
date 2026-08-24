@@ -50,8 +50,8 @@ pub enum TxStatus {
         reason: String,
     },
     Replaced,
-    /// We cancelled this tx: a self-send at its nonce evicted it. Terminal, and distinct
-    /// from `Replaced` (a *foreign* tx taking the nonce) so refill never fires on a cancel.
+    /// We cancelled this tx: a self-send at its nonce evicted it. Terminal, distinct from
+    /// `Replaced` (a *foreign* tx taking the nonce).
     Dropped,
 }
 
@@ -89,12 +89,10 @@ pub struct TxHandle {
     pub signed: Bytes,
     pub broadcasts: Vec<TxHash>,
     pub last_broadcast_at: u64,
-    /// Set when `cancel(id)` targeted this handle, so its nonce being consumed settles it
-    /// as `Dropped` rather than `Replaced`.
+    /// Set by `cancel(id)`: its nonce being consumed settles the handle as `Dropped`.
     #[serde(default)]
     pub cancelled: bool,
-    /// Set once this handle has spawned its refill — a per-handle double-spawn guard, not a
-    /// chain cap; the refilled child is left `false`, so it can refill again until mined.
+    /// Set once this handle has spawned its refill (per-handle double-spawn guard).
     #[serde(default)]
     pub refilled: bool,
 }

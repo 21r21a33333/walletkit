@@ -29,14 +29,13 @@ pub(crate) fn build_tx(
     }
 }
 
-/// A 2718-encoded signed transaction paired with its hash — the shape submit/track need.
+/// A 2718-encoded signed transaction paired with its hash.
 pub(crate) struct SignedTx {
     pub rlp: Bytes,
     pub hash: TxHash,
 }
 
-/// Fee fields and gas limit recovered from a persisted 1559 signed body — the shape the
-/// bump/cancel paths need to re-price against the current on-chain tx.
+/// Fee fields and gas limit decoded from a persisted 1559 signed body.
 pub(crate) struct SignedFees {
     pub fees: Eip1559Estimation,
     pub gas_limit: u64,
@@ -69,8 +68,7 @@ pub(crate) async fn sign_encode(
     })
 }
 
-/// Recover the fee fields + gas limit from a persisted EIP-1559 signed tx; a non-1559
-/// envelope can't be bumped or re-priced by this path.
+/// Recover fee fields + gas limit from a 1559 signed tx; `None` for non-1559 envelopes.
 pub(crate) fn decode_fees(signed: &Bytes) -> Option<SignedFees> {
     match TxEnvelope::decode_2718(&mut signed.as_ref()).ok()? {
         TxEnvelope::Eip1559(signed_tx) => {

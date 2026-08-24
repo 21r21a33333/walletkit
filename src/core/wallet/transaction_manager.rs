@@ -191,11 +191,8 @@ impl TransactionManager {
             .await
     }
 
-    /// Cancel a pending tx: a policy-gated 0-value self-send at its nonce (RBF over the
-    /// target), tracked as its own handle. Errors if the tx already settled; the original
-    /// settles as `Dropped` once the cancel mines. Always broadcasts the self-send — a
-    /// persisted `Pending` handle may already be in the mempool (recover rebroadcasts it),
-    /// so recycling its nonce would risk reuse.
+    /// Cancel a pending tx: a policy-gated 0-value self-send at its nonce (RBF). Errors if
+    /// the tx already settled; the original settles as `Dropped` once the cancel mines.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(name = "wallet.cancel", level = "info", skip_all, fields(id = ?id))
@@ -219,32 +216,19 @@ impl TransactionManager {
             purpose: None,
         };
         let intent_hash = intent.hash();
-        let approval = match self
-            .policy
-            .evaluate(&SigningRequest::Cancel(intent.clone()))
-            .await?
-        {
-            Decision::Allow(approval) => approval,
-            Decision::Deny(rejection) => return Err(TransactionManagerError::Denied(rejection)),
-        };
+        let approval = self
+            .authorize(&SigningRequest::Cancel(intent.clone()))
+            .await?;
 
-        // WAL before broadcast: any consumption of the nonce (even from a submit we thought
-        // failed) settles the original as `Dropped` — and refill never fires on Dropped.
+        // Persist cancelled=true before broadcasting: any consumption of this nonce settles
+        // the original Dropped, regardless of what the submit does.
         target.cancelled = true;
         self.state_store.put_handle(&target).await?;
 
         let now = self.clock.now_unix();
         let basis = fee_basis(&target.signed)?;
         let signed = self
-            .broadcast_cancel_with_repricing(
-                id,
-                &intent,
-                intent_hash,
-                target.nonce,
-                basis,
-                &approval,
-                now,
-            )
+            .broadcast_cancel_with_repricing(&target, &intent, basis, &approval, now)
             .await?;
 
         let cancel = TxHandle {
@@ -266,26 +250,22 @@ impl TransactionManager {
         Ok(cancel)
     }
 
-    /// Sign and submit the cancel self-send at `basis`; on `replacement transaction
-    /// underpriced` (a concurrent bump of the target re-priced it between our read and
-    /// send) re-fetch the target's current fees and resend once. `already known`/`nonce
-    /// too low` are treated as success — the cancel (or the original) is already there.
-    #[allow(clippy::too_many_arguments)]
+    /// Sign and submit the cancel at `basis`; on `replacement transaction underpriced`
+    /// (target re-priced concurrently) re-fetch its fees and resend once. `already known`
+    /// / `nonce too low` count as success (the tx is already in the pool).
     async fn broadcast_cancel_with_repricing(
         &self,
-        target_id: HandleId,
+        target: &TxHandle,
         intent: &TxIntent,
-        intent_hash: crate::core::wallet::IntentHash,
-        nonce: u64,
-        initial_basis: Eip1559Estimation,
+        mut basis: Eip1559Estimation,
         approval: &PolicyApproval,
         now: u64,
     ) -> Result<signing::SignedTx, TransactionManagerError> {
-        let mut basis = initial_basis;
+        let intent_hash = intent.hash();
         let mut attempts = 0u8;
         loop {
             let fees = self.gas_oracle.bump(basis).await?;
-            let tx = signing::build_tx(intent, nonce, CANCEL_GAS_LIMIT, fees);
+            let tx = signing::build_tx(intent, target.nonce, CANCEL_GAS_LIMIT, fees);
             let signed =
                 signing::sign_encode(&*self.signer, tx, intent_hash, approval, now).await?;
             match self.submission.submit(signed.rlp.clone()).await {
@@ -295,11 +275,14 @@ impl TransactionManager {
                     attempts += 1;
                     let fresh = self
                         .state_store
-                        .handle(target_id)
+                        .handle(target.id)
                         .await?
                         .ok_or(TransactionManagerError::UnknownHandle)?;
                     basis = fee_basis(&fresh.signed)?;
-                    warn!(nonce, "cancel underpriced; re-basing over the target");
+                    warn!(
+                        nonce = target.nonce,
+                        "cancel underpriced; re-basing over the target"
+                    );
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -388,9 +371,8 @@ impl TransactionManager {
     }
 }
 
-/// The fee basis to re-price a cancel against — the target's own current fees, over which
-/// `gas_oracle.bump` clears geth's +10%-both-fields RBF floor. A non-1559 signed body (or
-/// undecodable bytes) is not something we can bump, so the cancel is terminal.
+/// The target's own fees, so `gas_oracle.bump` clears geth's +10% RBF floor. `None` from
+/// `decode_fees` (non-1559 or undecodable) is terminal — nothing to bump against.
 fn fee_basis(signed: &Bytes) -> Result<Eip1559Estimation, TransactionManagerError> {
     signing::decode_fees(signed)
         .map(|f| f.fees)
@@ -600,9 +582,7 @@ mod tests {
     // --- cancel(id) ---
 
     #[tokio::test]
-    async fn cancel_on_a_terminal_handle_is_terminal_error() {
-        // A `Confirmed`/`Failed`/`Replaced`/`Dropped` handle can't be cancelled — there is
-        // nothing in flight. The public error kind is Terminal (no retry).
+    async fn cancel_on_terminal_handle_errors() {
         use crate::testutils::handle;
         let store = Arc::new(MockStore::default());
         let done = handle(5, TxStatus::Confirmed { block: 12 });
