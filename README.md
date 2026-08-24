@@ -11,12 +11,12 @@ See [SPEC.md](SPEC.md) for the full design specification: architecture, the 7-ph
 walletkit's `Transport` reuses alloy's transport layers (retry/backoff + multi-endpoint
 failover) and adds no bespoke resilience. For production, we **recommend running
 [eRPC](https://github.com/erpc/erpc)** as your RPC layer and pointing walletkit at it
-with `Transport::single(erpc_url)`. eRPC owns the RPC-management catalog — failover,
+with `Transport::url(erpc_url)`. eRPC owns the RPC-management catalog — failover,
 hedging, reorg-aware caching, request dedup, cross-upstream quorum, rate-limits, and
 per-method overrides — so walletkit stays thin and you configure RPC policy in one place.
 
-Without eRPC, `Transport::new(primary, fallbacks)` gives in-process failover across
-multiple endpoints.
+Without eRPC, `Transport::builder(primary).fallbacks(rest).build()` (or
+`Transport::from_config`) gives in-process failover across multiple endpoints.
 
 ## Status
 

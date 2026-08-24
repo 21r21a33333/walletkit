@@ -1,7 +1,7 @@
 //! `Transport` — the one concrete [`Rpc`] adapter. It wraps an alloy provider
 //! (type-erased into a [`DynProvider`], so the struct is concrete and non-generic)
 //! and reuses alloy's transport layers for reliability. Construction lives in
-//! [`build`]: [`Transport::builder`] for full control, [`Transport::single`] for a
+//! [`build`]: [`Transport::builder`] for full control, [`Transport::url`] for a
 //! single HTTP endpoint, or [`Transport::from_config`] from a declarative
 //! [`TransportConfig`] (per-chain, config-file friendly).
 //!
@@ -12,7 +12,7 @@
 //! *stateful/coordinated* features — reorg-aware caching, cross-upstream quorum,
 //! provider auto-discovery, per-method routing — are **not** reimplemented here;
 //! run **[eRPC](https://github.com/erpc/erpc)** and point one endpoint at it
-//! (`Transport::single(erpc_url)`). Per chain, hold a `chain_id -> Transport` map
+//! (`Transport::url(erpc_url)`). Per chain, hold a `chain_id -> Transport` map
 //! (assembled by the facade) built from one [`TransportConfig`] each.
 
 mod build;
@@ -32,6 +32,16 @@ use async_trait::async_trait;
 
 pub struct Transport {
     provider: DynProvider,
+}
+
+impl Transport {
+    /// A clone of the resilient provider this transport wraps, for read-only adapters
+    /// ([`RpcReadClient`](crate::adapters::RpcReadClient), ENS) that need typed
+    /// `sol!`/multicall access yet must inherit the same failover/retry/hedge as the
+    /// write path. `DynProvider` is `Arc`-backed, so the clone is cheap.
+    pub fn provider(&self) -> DynProvider {
+        self.provider.clone()
+    }
 }
 
 #[async_trait]
@@ -118,8 +128,8 @@ impl Rpc for Transport {
 
 /// Map an alloy transport error to our port error. A transport-level failure
 /// (network/timeout/5xx/429, via alloy's `is_retry_err`) is transient/retryable; a
-/// JSON-RPC method error (e.g. "nonce too low") is terminal.
-fn rpc_err(e: TransportError) -> RpcError {
+/// JSON-RPC method error (e.g. "nonce too low") is terminal. Shared with the read adapter.
+pub(crate) fn rpc_err(e: TransportError) -> RpcError {
     let transient = matches!(&e, AlloyRpcError::Transport(kind) if kind.is_retry_err());
     RpcError::Call {
         transient,

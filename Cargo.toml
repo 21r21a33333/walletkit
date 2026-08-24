@@ -13,6 +13,9 @@ publish = false
 
 [dependencies]
 alloy-consensus = "2.4.1"
+# Typed contract instances (`#[sol(rpc)]` + `.call()`) for the read client's ERC-20/721/1155
+# and Multicall3 reads.
+alloy-contract = "2.4.1"
 # EIP-712 `TypedData`/`Eip712Domain` for the signing surface; reuse alloy's encoder.
 alloy-dyn-abi = { version = "1", features = ["eip712"] }
 alloy-eips = "2.4.1"
@@ -24,6 +27,8 @@ alloy-rpc-client = "2.4.1"
 alloy-rpc-types-eth = "2.4.1"
 alloy-signer = "2.4.1"
 alloy-signer-local = { version = "2.4.1", features = ["keystore", "mnemonic"] }
+# `sol!` typed ABI + `Revert`/`Panic` revert decoding, used directly by the read/preview adapters.
+alloy-sol-types = "1"
 alloy-transport = { version = "2.4.1", features = ["throttle"] }
 alloy-transport-http = { version = "2.4.1", features = ["reqwest"] }
 async-trait = "0.1.92"

@@ -6,14 +6,19 @@ pub mod gas_oracle;
 pub mod nonce;
 pub mod policy;
 pub mod public_mempool;
+pub mod read;
 pub mod signers;
 pub mod store;
 pub mod transport;
+
+/// Shared Multicall3 batching primitive used by the read adapter (and, later, preview).
+pub(crate) mod multicall;
 
 pub use clock::SystemClock;
 pub use gas_oracle::RpcGasOracle;
 pub use nonce::LocalNonceManager;
 pub use public_mempool::PublicMempool;
+pub use read::RpcReadClient;
 pub use signers::LocalSigner;
 pub use store::InMemoryStateStore;
 #[cfg(feature = "postgres")]

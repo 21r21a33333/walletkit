@@ -4,14 +4,29 @@
 //! chosen backend is unavailable (no `DATABASE_URL` for Postgres). Every wallet tx targets
 //! the allowlisted [`RECIPIENT`]; the native policy is default-deny and `PolicyApproval`
 //! can't be minted outside the crate.
+//!
+//! Shared across every `tests/*.rs` binary; each uses a different subset of helpers, so
+//! per-binary `dead_code` is expected and silenced here.
+#![allow(dead_code)]
 
 use alloy_node_bindings::{Anvil, AnvilInstance};
-use alloy_primitives::{Address, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_sol_types::sol;
 use std::sync::Arc;
 use tempfile::TempDir;
 use url::Url;
 use walletkit::Wallet;
+
+sol! {
+    /// The read/preview integration fixture (see `mock_erc20.bin`). `revertWith` reverts
+    /// with `Error("nope")` for the preview revert-decode test.
+    #[sol(rpc)]
+    interface MockErc20 {
+        function approve(address spender, uint256 amount) external returns (bool);
+        function revertWith() external pure;
+    }
+}
 #[cfg(feature = "postgres")]
 use walletkit::adapters::PostgresStateStore;
 #[cfg(feature = "redb")]
@@ -151,6 +166,71 @@ impl Localnet {
         self._anvil.chain_id()
     }
 
+    /// The node's HTTP endpoint (for building a standalone `Transport`/read client).
+    pub fn endpoint(&self) -> Url {
+        self.endpoint.clone()
+    }
+
+    /// Address of funded anvil dev account `index` (the harness spawns 16).
+    pub fn account_at(&self, index: u32) -> Address {
+        LocalSigner::from_mnemonic(ANVIL_MNEMONIC, index)
+            .expect("mnemonic")
+            .address()
+    }
+
+    /// Deploy the committed mock ERC-20 from funded account `deployer_index` and return its
+    /// address. The constructor mints the full supply to the deployer.
+    pub async fn deploy_mock_erc20(&self, deployer_index: u32) -> Address {
+        use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+        let hex = include_str!("fixtures/mock_erc20.bin").trim();
+        let code = Bytes::from(alloy_primitives::hex::decode(hex).expect("valid hex"));
+        let tx = TransactionRequest {
+            from: Some(self.account_at(deployer_index)),
+            input: TransactionInput::new(code),
+            ..Default::default()
+        };
+        let receipt = self
+            .control
+            .send_transaction(tx)
+            .await
+            .expect("deploy send")
+            .get_receipt()
+            .await
+            .expect("deploy receipt");
+        receipt.contract_address.expect("contract address")
+    }
+
+    /// Inject the canonical Multicall3 at its well-known address via `anvil_setCode`. anvil
+    /// doesn't predeploy it, but real chains have it (keyless deploy), so reads that batch
+    /// through it need it present.
+    pub async fn deploy_multicall3(&self) {
+        const MULTICALL3: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
+        let code = include_str!("fixtures/multicall3.bin").trim();
+        let _: () = self
+            .control
+            .raw_request("anvil_setCode".into(), (MULTICALL3, code))
+            .await
+            .expect("anvil_setCode multicall3");
+    }
+
+    /// Send a no-value contract call from funded account `from_index` and wait for it to mine.
+    pub async fn send_tx(&self, from_index: u32, to: Address, input: Bytes) {
+        use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+        let tx = TransactionRequest {
+            from: Some(self.account_at(from_index)),
+            to: Some(TxKind::Call(to)),
+            input: TransactionInput::new(input),
+            ..Default::default()
+        };
+        self.control
+            .send_transaction(tx)
+            .await
+            .expect("send")
+            .get_receipt()
+            .await
+            .expect("receipt");
+    }
+
     /// Mine `n` blocks via `anvil_mine`.
     pub async fn mine(&self, n: u64) {
         let _: () = self
@@ -203,6 +283,37 @@ impl Localnet {
     }
 }
 
+/// A mainnet-forked anvil pinned at a fixed block: every read resolves at that immutable
+/// state, so exact real-chain values can be asserted without rotting as balances change.
+/// `None` — a clean skip — when anvil is unavailable or the (archive) upstream won't serve
+/// the fork block.
+pub struct ForkedNet {
+    _anvil: AnvilInstance,
+    endpoint: Url,
+}
+
+impl ForkedNet {
+    /// Fork `rpc_url` (must serve archive state at `block`) and pin at `block`.
+    pub async fn pin(rpc_url: &str, block: u64) -> Option<ForkedNet> {
+        let anvil = Anvil::new()
+            .arg("--fork-url")
+            .arg(rpc_url)
+            .arg("--fork-block-number")
+            .arg(block.to_string())
+            .try_spawn()
+            .ok()?;
+        let endpoint = anvil.endpoint_url();
+        Some(ForkedNet {
+            _anvil: anvil,
+            endpoint,
+        })
+    }
+
+    pub fn endpoint(&self) -> Url {
+        self.endpoint.clone()
+    }
+}
+
 /// Build the store for `backend`, resetting `account` for a deterministic run (redb gets a
 /// fresh temp file; Postgres clears the account's rows). `None` skips an unavailable backend.
 #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] // `account` only clears Postgres rows
@@ -238,7 +349,7 @@ fn build_wallet(
     refill_on_replaced: bool,
 ) -> Option<Wallet> {
     let signer = LocalSigner::from_mnemonic(ANVIL_MNEMONIC, account_index).ok()?;
-    let transport = Transport::single(endpoint.clone()).ok()?;
+    let transport = Transport::url(endpoint.clone()).ok()?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(
         vec![Box::new(TargetAllowlist::new([RECIPIENT]))],

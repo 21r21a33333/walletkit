@@ -525,7 +525,7 @@ use walletkit::core::deps::ReadClient;
 // Spawn a bare anvil (no wallet needed) + a read client over it, or skip.
 async fn read_client() -> Option<(Localnet, RpcReadClient, Address)> {
     let net = Localnet::spawn_bare().await?; // add this thin ctor (see note)
-    let transport = Transport::single(net.endpoint()).ok()?;
+    let transport = Transport::url(net.endpoint()).ok()?;
     let deployer = net.account(0);
     Some((net, RpcReadClient::new(transport.provider()), deployer))
 }
@@ -683,7 +683,7 @@ use walletkit::core::deps::{Rpc, Simulated};
 async fn transport_call_returns_revert_data_for_a_reverting_call() {
     let Some(net) = Localnet::spawn_bare().await else { return };
     let token = net.deploy_mock_erc20(0).await;
-    let transport = Transport::single(net.endpoint()).unwrap();
+    let transport = Transport::url(net.endpoint()).unwrap();
 
     // revertWith() reverts with Error("nope").
     let req = alloy_rpc_types_eth::TransactionRequest::default()
@@ -1097,7 +1097,7 @@ async fn resolves_and_reverse_verifies_vitalik_eth() {
     };
     use walletkit::adapters::{RpcEnsResolver, Transport};
     use walletkit::core::deps::EnsResolver;
-    let transport = Transport::single(url.parse().unwrap()).unwrap();
+    let transport = Transport::url(url.parse().unwrap()).unwrap();
     let ens = RpcEnsResolver::new(transport.provider());
     let addr = ens.resolve_name("vitalik.eth").await.unwrap().expect("resolves");
     let back = ens.reverse_lookup(addr).await.unwrap();

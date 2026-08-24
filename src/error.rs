@@ -3,8 +3,8 @@
 //! classified for retry with a machine-readable [`ErrorKind`].
 
 use crate::core::deps::{
-    GasOracleError, NonceManagerError, PolicyEngineError, RpcError, SignerError, StateStoreError,
-    SubmissionError,
+    GasOracleError, NonceManagerError, PolicyEngineError, ReadError, RpcError, SignerError,
+    StateStoreError, SubmissionError,
 };
 use crate::core::wallet::{ExecutorError, PolicyRejection, TransactionManagerError};
 use alloy_primitives::Address;
@@ -43,6 +43,9 @@ pub enum WalletKitError {
     Submission(SubmissionError),
     #[error(transparent)]
     Store(StateStoreError),
+    /// A chain read failed (RPC transport or on-chain decode).
+    #[error(transparent)]
+    Read(ReadError),
     #[error("simulation rejected: {reason}")]
     Simulation { reason: String },
     #[error("signer {signer} does not control the intent account {intent}")]
@@ -63,6 +66,8 @@ impl WalletKitError {
             Self::Nonce(NonceManagerError::Store(e)) => store_kind(e),
             Self::Submission(e) => submission_kind(e),
             Self::Store(e) => store_kind(e),
+            Self::Read(ReadError::Rpc(e)) => rpc_kind(e),
+            Self::Read(ReadError::Decode { .. }) => ErrorKind::Terminal,
             Self::Signer(_)
             | Self::Policy(_)
             | Self::PolicyEngine(_)
@@ -187,6 +192,12 @@ impl From<ExecutorError> for WalletKitError {
 impl From<StateStoreError> for WalletKitError {
     fn from(e: StateStoreError) -> Self {
         Self::Store(e)
+    }
+}
+
+impl From<ReadError> for WalletKitError {
+    fn from(e: ReadError) -> Self {
+        Self::Read(e)
     }
 }
 
