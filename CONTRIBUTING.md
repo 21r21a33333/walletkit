@@ -12,6 +12,9 @@ the quality bar every change must clear.
 - Optional: [Foundry](https://book.getfoundry.sh/) (`anvil`) to run the localnet
   integration tests in [`tests/`](tests). They **skip cleanly** when `anvil` is not on
   `PATH`, so the suite is a no-op without it.
+- Activate the repo hooks once per clone: `git config core.hooksPath .githooks`. The
+  `pre-commit` gate blocks comments that violate the standard below (bypass a genuine false
+  positive with `git commit --no-verify`).
 
 ## The gate — run before every push
 
