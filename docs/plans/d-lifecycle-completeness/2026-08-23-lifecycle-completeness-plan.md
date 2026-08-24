@@ -73,7 +73,9 @@ Add two persisted flags to `TxHandle` (serde default `false`):
     /// as `Dropped` rather than `Replaced`.
     #[serde(default)]
     pub cancelled: bool,
-    /// Set once intent-refill has re-executed this handle's intent (idempotent).
+    /// Set once THIS handle has spawned its refill — a per-handle double-spawn guard
+    /// (crash-idempotent), NOT a chain cap. The refilled child is left `false`, so a
+    /// re-displaced child refills again; the chain ends only when an attempt is mined.
     #[serde(default)]
     pub refilled: bool,
 ```
@@ -232,24 +234,29 @@ let next = if next == TxStatus::Replaced && handle.cancelled { TxStatus::Dropped
 ```rust
 // Re-execute the intent a foreign tx displaced, at a fresh nonce + fresh approval.
 // `send_intent` re-runs the full policy path (a refill is a fresh authorization), so a
-// policy change since the original is honored.
-if let Ok(mut new) = send_intent(/* ports */, handle.intent.clone()).await {
-    handle.refilled = true;
+// policy change since the original is honored. The child is NOT marked refilled, so if it
+// is displaced too it refills again — the chain continues until an attempt is mined.
+if let Ok(new) = send_intent(/* ports */, handle.intent.clone()).await {
+    handle.refilled = true; // guard THIS handle only — no double-spawn on restart
     let _ = self.state_store.put_handle(&handle).await;
-    // Mark the child refilled too, so a chain of foreign replacements can't refill forever.
-    new.refilled = true;
-    let _ = self.state_store.put_handle(&new).await;
     debug!(nonce = new.nonce, "intent refilled after replacement");
 }
 ```
-Best-effort: a refill failure is logged, never aborts the tick. Idempotent via the persisted
-`refilled` flag — a **permanent per-intent marker** (return-original-on-repeat), not a
-time-boxed key, and re-authorized through the normal policy path.
+**At-least-once until mined (user-directed): no refill cap.** The chain re-fires on each
+*foreign* `Replaced` and ends only when an attempt reaches `Confirmed`, hits an on-chain
+`Failed` (mined-but-reverted ≠ `Replaced`), or `send_intent` fails best-effort (RPC error, or
+the fresh policy/balance check now denies — the natural circuit-breaker). A refill failure is
+logged, never aborts the tick. The persisted `refilled` flag is per-handle double-spawn
+protection across restart, not a chain marker.
 ([Fireblocks externalTxId](https://developers.fireblocks.com/reference/api-idempotency), [Turnkey](https://docs.turnkey.com/concepts/introduction))
+
+  **Crash-ordering (settle in impl):** to stay at-most-one-refill-per-displacement across a
+  crash, persist the parent's `refilled = true` (or the parent as terminal `Replaced`) *before*
+  trusting the spawn — on restart a terminal/`refilled` parent is skipped, so it can't double-spawn.
 
 - [ ] **Step 3: Builder knob** (`facade.rs`) — `WalletBuilder::refill_on_replaced(bool)`, threaded to `AccountExecutor::with_refill_on_replaced` in `build`.
 
-- [ ] **Step 4: Localnet test** — `intent_refilled_after_foreign_replacement`: `no_auto_mine`, send our tx (nonce 0), `steal_nonce(0)` with a foreign tx, mine; with refill **on**, a new handle appears at nonce 1 and confirms and the original is `Replaced` + `refilled`; a control run with refill **off** leaves no new handle. (Matrix: in-memory + redb; skip postgres if the harness account collides.)
+- [ ] **Step 4: Localnet test** — `intent_refilled_after_foreign_replacement`: `no_auto_mine`, send our tx (nonce 0), `steal_nonce(0)` with a foreign tx, mine; with refill **on**, a new handle appears at nonce 1 and confirms and the original is `Replaced` + `refilled`; a control run with refill **off** leaves no new handle. Add `intent_refills_until_mined`: displace **twice** (steal nonce 0, then steal the refill's nonce), and assert a third attempt lands `Confirmed` — proving the chain re-fires past one displacement. (Matrix: in-memory + redb; skip postgres if the harness account collides.)
 
 - [ ] **Step 5: Gate + report.** Commit on approval: `feat(lifecycle): opt-in intent-refill after foreign replacement`
 

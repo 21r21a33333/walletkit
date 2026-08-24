@@ -12,7 +12,7 @@ Complete the transaction lifecycle so a caller can **cancel** a stuck tx, the ex
 - **`cancel(id)`** — a policy-gated 0-value self-send at the stuck nonce (RBF over the target), tracked to `Confirmed`; the cancelled original settles as **`Dropped`**. Folds in "gap-fill" (a self-send at a stuck nonce is the same operation).
 - **`TxStatus::Dropped`** — the terminal state of an original we cancelled (distinct from `Replaced` = a *foreign* tx took our nonce). Delivers "settle, never hang" as a give-up state you *chose*.
 - **`SigningRequest::Cancel`** + native-engine **default-allow-iff-genuine-self-send** (closes the smuggling hole; a strict policy can still veto).
-- **intent-refill** (opt-in, default off) — on a *foreign* `Replaced`, re-execute the original intent at a fresh nonce + fresh approval; idempotent.
+- **intent-refill** (opt-in, default off) — on a *foreign* `Replaced`, re-execute the original intent at a fresh nonce + fresh approval, and **keep re-firing on each subsequent displacement until the intent is mined** (or reverts, or the fresh policy/balance gate denies). Per-handle idempotent (one displacement → one refill).
 
 **Out (deferred) — with the phase map so nothing is silently dropped:**
 
@@ -43,7 +43,7 @@ Two entry points, both reusing existing machinery; no new FSM states beyond `Dro
 ### Types (`primitives`)
 - `SigningRequest::Cancel(TxIntent)` — the 0-value self-send. `signing_hash()` = `intent.hash()`.
 - `TxStatus::Dropped` (terminal; `TxStatus` is `#[non_exhaustive]`) — add to `is_terminal()`.
-- `TxHandle` gains two persisted `bool`s (serde-compatible, default `false`): `cancelled` (→ settle as `Dropped`, not `Replaced`) and `refilled` (idempotent refill).
+- `TxHandle` gains two persisted `bool`s (serde-compatible, default `false`): `cancelled` (→ settle as `Dropped`, not `Replaced`) and `refilled` (per-handle guard: this handle already spawned its one refill — double-spawn protection across restart, **not** a chain-length cap).
 
 ### Policy (native engine)
 - `Cancel(intent)` **default-allows iff** `intent.to == Call(intent.account) && intent.value.is_zero() && intent.input.is_empty()`; otherwise `Deny` (a non-self-send can't ride the cancel path). deny-over-allow still applies. wasm/moonpay default-deny `Cancel`.
@@ -59,7 +59,7 @@ Two entry points, both reusing existing machinery; no new FSM states beyond `Dro
 
 ### intent-refill (executor, opt-in)
 - `AccountExecutor::with_refill_on_replaced(bool)` (wired from a `WalletBuilder` knob), default off.
-- In `confirm`, when a handle settles to `Replaced` and `!cancelled && !refilled && refill_enabled`: call the shared `send_intent(handle.intent)` (fresh nonce, fresh policy approval), then set `refilled = true` and persist. Idempotent across restart via the persisted flag.
+- In `confirm`, when a handle settles to `Replaced` and `!cancelled && !refilled && refill_enabled`: call the shared `send_intent(handle.intent)` (fresh nonce, fresh policy approval), then set **only this handle's** `refilled = true` and persist. The **child is not marked**, so if it too is displaced it refills again — the chain continues until an attempt reaches `Confirmed`. Natural stops: confirmation, an on-chain `Failed` (mined-but-reverted → not `Replaced`), or a best-effort `send_intent` failure (RPC error, or the fresh policy/balance check now denies). `refilled` is per-handle double-spawn protection across restart, not a cap.
 
 ## Data flow (cancel)
 
@@ -88,7 +88,7 @@ Wallet::cancel(id)
 - **cancel rejects terminal** (unit).
 - **Dropped settling (localnet):** send a low-fee tx (mining off), `cancel(id)`, mine → the cancel confirms and the original is `Dropped`; a fresh send reuses the freed nonce.
 - **cancel re-bump (unit):** a stuck cancel handle bumps via the `Cancel` request (doesn't default-deny).
-- **intent-refill (localnet):** a foreign tx takes our nonce → with refill on, the intent re-executes at the next nonce and confirms; with refill off, it stays `Replaced`. Idempotent: refill fires once.
+- **intent-refill (localnet):** a foreign tx takes our nonce → with refill on, the intent re-executes at the next nonce and confirms; with refill off, it stays `Replaced`. **Re-fires past one displacement:** displace twice → a third attempt still lands. Per-handle idempotency: a single displacement spawns exactly one refill (no double-spawn).
 - No tests for the serde flags or enum plumbing.
 
 ## Files touched
@@ -116,7 +116,7 @@ and produced concrete, cited refinements.
 - **D-T2** **pre-broadcast fast path**: if the target was never broadcast, cancel just **recycles the nonce** — no on-chain self-send. ([thirdweb Engine](https://portal.thirdweb.com/engine/v2/features/transactions))
 - **D-T2** cancel gas is hard-coded **21000** (self-send, empty data) — no re-estimation. ([Yellow Paper G_transaction](https://ethereum.github.io/yellowpaper/paper.pdf))
 - **D-T3** the `Dropped`-vs-`Replaced` terminal is **chain-authoritative** via nonce reconciliation over hashes we already broadcast (thirdweb's model) — exactly what `event_for` already does; the `cancelled` flag only *labels* the outcome `Dropped`. ([thirdweb engine-core](https://github.com/thirdweb-dev/engine-core/blob/main/README_EOA.md))
-- **D-T4** refill idempotency is a **permanent per-intent marker** (not time-boxed), the new refilled handle is itself marked `refilled` (bounds the chain to one), and refill **re-runs the full policy path** (a fresh authorization). ([Fireblocks externalTxId](https://developers.fireblocks.com/reference/api-idempotency), [Turnkey](https://docs.turnkey.com/concepts/introduction))
+- **D-T4** refill is **at-least-once until mined** (user-directed): it re-fires on every *foreign* `Replaced` until an attempt confirms; the per-handle `refilled` flag only stops a single displacement from spawning two refills (crash-idempotent), it does **not** cap the chain. The natural circuit-breaker is the **full policy path re-run on every refill** (a fresh authorization — a now-insufficient balance or a tightened rule denies and ends the chain), plus best-effort send failures. ([Fireblocks externalTxId](https://developers.fireblocks.com/reference/api-idempotency), [Turnkey](https://docs.turnkey.com/concepts/introduction))
 
 **Deferred (reviewer-confirmed 2026-08-23):**
 - **`Invalid` 4th terminal** (reth's permanently-unminable state) — deferred; no concrete producer in D beyond `Replaced`/`Failed`. Add later against [reth events](https://reth.rs/docs/src/reth_transaction_pool/pool/events.rs.html) if a real case appears.
