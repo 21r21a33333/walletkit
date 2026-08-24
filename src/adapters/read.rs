@@ -1,7 +1,7 @@
 //! `RpcReadClient` — the one [`ReadClient`] adapter, over a resilient alloy `DynProvider`
 //! (the same one [`Transport`](crate::adapters::Transport) builds, so reads inherit its
 //! failover/retry/hedge). Single reads use `sol!` contract instances; `balances` and
-//! `erc20_metadata` batch through the [`Multicall`] builder. Only concrete domain types
+//! `erc20_metadata` batch through the `Multicall` builder. Only concrete domain types
 //! cross the port — `sol!` types stay here.
 
 use crate::adapters::multicall::{Multicall, MulticallResult, contract_error};
