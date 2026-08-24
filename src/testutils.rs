@@ -75,6 +75,8 @@ pub(crate) fn handle(nonce: u64, status: TxStatus) -> TxHandle {
         signed: signed_tx(nonce),
         broadcasts: vec![TxHash::ZERO],
         last_broadcast_at: 0,
+        cancelled: false,
+        refilled: false,
     }
 }
 

@@ -28,7 +28,6 @@ impl HandleId {
 /// before then re-tracks: `Mined`/`Replacing` fall back to `Sent`. This is the
 /// depth-gated finality of OZ Defender (12 confs) / thirdweb / Alchemy; `Replaced`
 /// on first sight would lose a tx whose nonce a reorg later frees.
-/// (`Dropped` arrives with the Send phase that can produce it.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum TxStatus {
@@ -51,6 +50,9 @@ pub enum TxStatus {
         reason: String,
     },
     Replaced,
+    /// We cancelled this tx: a self-send at its nonce evicted it. Terminal, and distinct
+    /// from `Replaced` (a *foreign* tx taking the nonce) so refill never fires on a cancel.
+    Dropped,
 }
 
 impl TxStatus {
@@ -59,7 +61,7 @@ impl TxStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Confirmed { .. } | Self::Failed { .. } | Self::Replaced
+            Self::Confirmed { .. } | Self::Failed { .. } | Self::Replaced | Self::Dropped
         )
     }
 }
@@ -87,4 +89,12 @@ pub struct TxHandle {
     pub signed: Bytes,
     pub broadcasts: Vec<TxHash>,
     pub last_broadcast_at: u64,
+    /// Set when `cancel(id)` targeted this handle, so its nonce being consumed settles it
+    /// as `Dropped` rather than `Replaced`.
+    #[serde(default)]
+    pub cancelled: bool,
+    /// Set once this handle has spawned its refill — a per-handle double-spawn guard, not a
+    /// chain cap; the refilled child is left `false`, so it can refill again until mined.
+    #[serde(default)]
+    pub refilled: bool,
 }

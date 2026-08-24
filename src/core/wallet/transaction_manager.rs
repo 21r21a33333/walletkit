@@ -221,6 +221,8 @@ impl TransactionManager {
             signed: rlp.clone(),
             broadcasts: vec![tx_hash],
             last_broadcast_at: now,
+            cancelled: false,
+            refilled: false,
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.
