@@ -40,8 +40,8 @@ impl TxIntent {
         }
     }
 
-    /// A cancel shape: a 0-value self-send with empty calldata (EIP-2831 `tx_cancel`;
-    /// viem/ethers' `cancelled` predicate).
+    /// A 0-value self-send with empty calldata (EIP-2831 `tx_cancel`; viem/ethers'
+    /// `cancelled` predicate).
     pub(crate) fn is_self_send(&self) -> bool {
         self.to == TxKind::Call(self.account) && self.value.is_zero() && self.input.is_empty()
     }

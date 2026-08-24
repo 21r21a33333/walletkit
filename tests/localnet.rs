@@ -313,12 +313,6 @@ async fn intent_refilled_after_foreign_replacement(net: Localnet) {
         matches!(original_status, Some(TxStatus::Replaced)),
         "original Replaced, got {original_status:?}"
     );
-    let original = wallet
-        .handle(original.id)
-        .await
-        .expect("handle")
-        .expect("present");
-    assert!(original.refilled, "original marked refilled");
 
     // The child carries the same intent (same hash) at nonce 1 and confirms.
     let child_id = HandleId::new(original.intent_hash, 1);

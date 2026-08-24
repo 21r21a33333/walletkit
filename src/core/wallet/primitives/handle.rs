@@ -92,7 +92,4 @@ pub struct TxHandle {
     /// Set by `cancel(id)`: its nonce being consumed settles the handle as `Dropped`.
     #[serde(default)]
     pub cancelled: bool,
-    /// Set once this handle has spawned its refill (per-handle double-spawn guard).
-    #[serde(default)]
-    pub refilled: bool,
 }

@@ -10,8 +10,8 @@ use crate::core::deps::{
     SubmissionError, SubmissionStrategy,
 };
 use crate::core::wallet::{
-    Decision, HandleId, PolicyApproval, PolicyRejection, SignatureEnvelope, SigningRequest,
-    TxHandle, TxIntent, TxStatus,
+    Decision, HandleId, IntentHash, PolicyApproval, PolicyRejection, SignatureEnvelope,
+    SigningRequest, TxHandle, TxIntent, TxStatus,
 };
 use crate::obs::{debug, error, info, warn};
 use alloy_dyn_abi::TypedData;
@@ -227,9 +227,19 @@ impl TransactionManager {
 
         let now = self.clock.now_unix();
         let basis = fee_basis(&target.signed)?;
-        let signed = self
-            .broadcast_cancel_with_repricing(&target, &intent, basis, &approval, now)
-            .await?;
+        let signed = match self
+            .broadcast_cancel_with_repricing(&target, &intent, intent_hash, basis, &approval, now)
+            .await
+        {
+            Ok(signed) => signed,
+            // The cancel never broadcast — un-poison the target so a later foreign displacement
+            // settles it `Replaced` (refillable), not a spurious `Dropped`.
+            Err(e) => {
+                target.cancelled = false;
+                let _ = self.state_store.put_handle(&target).await;
+                return Err(e);
+            }
+        };
 
         let cancel = TxHandle {
             id: HandleId::new(intent_hash, target.nonce),
@@ -243,7 +253,6 @@ impl TransactionManager {
             broadcasts: vec![signed.hash],
             last_broadcast_at: now,
             cancelled: false,
-            refilled: false,
         };
         self.state_store.put_handle(&cancel).await?;
         info!(nonce = target.nonce, "cancel submitted");
@@ -257,11 +266,11 @@ impl TransactionManager {
         &self,
         target: &TxHandle,
         intent: &TxIntent,
+        intent_hash: IntentHash,
         mut basis: Eip1559Estimation,
         approval: &PolicyApproval,
         now: u64,
     ) -> Result<signing::SignedTx, TransactionManagerError> {
-        let intent_hash = intent.hash();
         let mut attempts = 0u8;
         loop {
             let fees = self.gas_oracle.bump(basis).await?;
@@ -324,7 +333,6 @@ impl TransactionManager {
             broadcasts: vec![signed.hash],
             last_broadcast_at: now,
             cancelled: false,
-            refilled: false,
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.

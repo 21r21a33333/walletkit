@@ -190,34 +190,30 @@ impl AccountExecutor {
             } else {
                 debug!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "status advanced");
             }
-            // A terminal handle no longer needs its cached approval.
+            // Refill is gated on the persist succeeding: a terminal handle that failed to
+            // persist stays in `pending_handles` and re-transitions next tick, so firing
+            // refill here would double-spawn the intent.
             if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
                 self.approvals.lock().remove(&handle.id);
-            }
-            // A foreign replacement (never a cancel — that settled Dropped above) re-executes
-            // the intent when refill is on.
-            if let Some(manager) = &self.refill
-                && handle.status == TxStatus::Replaced
-                && !handle.refilled
-            {
-                self.refill_intent(manager, &mut handle).await;
+                // A foreign replacement (never a cancel — that settled Dropped above)
+                // re-executes the intent when refill is on.
+                if let Some(manager) = &self.refill
+                    && handle.status == TxStatus::Replaced
+                {
+                    self.refill_intent(manager, &handle).await;
+                }
             }
         }
         Ok(())
     }
 
-    /// Best-effort re-execution of a displaced intent at a fresh nonce + fresh approval. Marks
-    /// only this handle; the child stays unmarked, so a re-displaced child refills again until
-    /// an attempt mines. A failure is logged, never aborts the tick.
-    async fn refill_intent(&self, manager: &TransactionManager, handle: &mut TxHandle) {
-        // `_child`/`_err` are read only by the obs macros; the underscore keeps a
-        // `--no-default-features` build (where they are no-ops) warning-free.
+    /// Best-effort re-execution of a displaced intent at a fresh nonce + fresh approval. The
+    /// child is a fresh handle, so if it too is displaced it refills again until an attempt
+    /// mines. A failure is logged, never aborts the tick.
+    async fn refill_intent(&self, manager: &TransactionManager, handle: &TxHandle) {
+        // Underscore keeps `_child`/`_err` warning-free when the obs macros are no-ops.
         match manager.send(&handle.intent).await {
-            Ok(_child) => {
-                handle.refilled = true;
-                let _ = self.state_store.put_handle(handle).await;
-                debug!(nonce = _child.nonce, "intent refilled after replacement");
-            }
+            Ok(_child) => debug!(nonce = _child.nonce, "intent refilled after replacement"),
             Err(_err) => warn!(error = %_err, nonce = handle.nonce, "refill failed"),
         }
     }

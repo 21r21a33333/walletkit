@@ -31,6 +31,12 @@ The reviewed design proposed **classify-gated** refill (fetch the foreign replac
 
 (If the reviewer wants deliberate out-of-band-cancel protection, that requires the event/indexer surface and belongs with the deferred classification — flag it at the spec-review gate.)
 
+## Implemented refinements (post code-review, 2026-08-24)
+
+- **No `refilled` field.** Refill is idempotent by construction: a handle terminalizes to `Replaced` and leaves `pending_handles`, so it is never re-processed. Firing refill is gated on that terminal **persist succeeding** — a failed persist keeps the handle non-terminal so it re-transitions next tick, rather than double-spawning. The child is a fresh handle, so a re-displaced child refills again (at-least-once until mined); no per-handle flag is needed.
+- **moonpay allows self-send cancels.** The MoonPay OWS engine evaluates a verified self-send `Cancel` through its tx rules (a stuck-tx safety valve) instead of default-denying it; a non-self-send `Cancel` is still denied. The native engine's default-allow is unchanged.
+- **cancel un-poisons on failure.** `cancel(id)` persists `cancelled=true` before broadcast; if the broadcast then fails terminally it reverts the flag, so a later foreign displacement settles `Replaced` (refillable), not a spurious `Dropped`.
+
 ## Architecture
 
 Two entry points, both reusing existing machinery; no new FSM states beyond `Dropped`:
@@ -43,10 +49,10 @@ Two entry points, both reusing existing machinery; no new FSM states beyond `Dro
 ### Types (`primitives`)
 - `SigningRequest::Cancel(TxIntent)` — the 0-value self-send. `signing_hash()` = `intent.hash()`.
 - `TxStatus::Dropped` (terminal; `TxStatus` is `#[non_exhaustive]`) — add to `is_terminal()`.
-- `TxHandle` gains two persisted `bool`s (serde-compatible, default `false`): `cancelled` (→ settle as `Dropped`, not `Replaced`) and `refilled` (per-handle guard: this handle already spawned its one refill — double-spawn protection across restart, **not** a chain-length cap).
+- `TxHandle` gains one persisted `bool` (serde-compatible, default `false`): `cancelled` (→ settle as `Dropped`, not `Replaced`). Refill needs no flag — see *Implemented refinements*.
 
 ### Policy (native engine)
-- `Cancel(intent)` **default-allows iff** `intent.to == Call(intent.account) && intent.value.is_zero() && intent.input.is_empty()`; otherwise `Deny` (a non-self-send can't ride the cancel path). deny-over-allow still applies. wasm/moonpay default-deny `Cancel`.
+- `Cancel(intent)` **default-allows iff** `intent.to == Call(intent.account) && intent.value.is_zero() && intent.input.is_empty()`; otherwise `Deny` (a non-self-send can't ride the cancel path). deny-over-allow still applies. wasm default-denies `Cancel`; moonpay evaluates a self-send `Cancel` through its tx rules (see *Implemented refinements*).
 
 ### `cancel(id)` — `TransactionManager::cancel` + `Wallet::cancel`
 - Load the handle; **reject if terminal** (`WalletKitError` terminal variant).
