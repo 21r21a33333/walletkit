@@ -167,6 +167,10 @@ impl AccountExecutor {
             else {
                 continue;
             };
+            let next = match next {
+                TxStatus::Replaced if handle.cancelled => TxStatus::Dropped,
+                other => other,
+            };
             // `_prev` is read only by the transition events below; the underscore keeps a
             // `--no-default-features` build (where the obs macros are no-ops) warning-free.
             let _prev = std::mem::replace(&mut handle.status, next);
@@ -348,12 +352,13 @@ impl AccountExecutor {
         {
             return Ok(Some(approval));
         }
-        // A stuck cancel handle (a self-send) must RBF via `Cancel` — a `Transaction`
-        // self-send default-denies, which would wedge the bump.
-        let request = if handle.intent.is_self_send() {
-            SigningRequest::Cancel(handle.intent.clone())
+        // `Cancel` default-allows a self-send; `Transaction` doesn't, so a stuck cancel
+        // would wedge on the wrong shape.
+        let intent = handle.intent.clone();
+        let request = if intent.is_self_send() {
+            SigningRequest::Cancel(intent)
         } else {
-            SigningRequest::Transaction(handle.intent.clone())
+            SigningRequest::Transaction(intent)
         };
         match self.policy.evaluate(&request).await? {
             Decision::Allow(approval) => Ok(admits(&approval).then_some(approval)),
@@ -1188,17 +1193,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stuck_cancel_handle_bumps_via_cancel_request_not_transaction() {
-        // A cancel is a self-send; the native engine default-denies a `Transaction` self-send
-        // (would wedge the bump) but default-allows a `Cancel` self-send. If `bump_approval`
-        // picks the request by shape, the RBF proceeds through fresh policy — proven end-to-
-        // -end against the real `DefaultPolicyEngine`.
+    async fn stuck_cancel_bumps_via_cancel_request() {
+        // Real engine, no rules: `Transaction` self-send default-denies, `Cancel` default-
+        // allows. If `bump_approval` picks by shape, the RBF proceeds; a wrong pick wedges.
         use crate::adapters::SystemClock;
         use crate::adapters::policy::DefaultPolicyEngine;
         use crate::core::wallet::TxIntent;
         use alloy_primitives::{TxKind, U256};
 
-        // Harness executor is wired for Address::ZERO — self-send targets the same account.
         let account = Address::ZERO;
         let self_send = TxIntent {
             chain_id: 1,
@@ -1216,9 +1218,6 @@ mod tests {
 
         let store = Arc::new(MockStore::default());
         store.put_handle(&h).await.unwrap();
-        // Real native engine with no rules: `Transaction` self-send default-denies, `Cancel`
-        // self-send default-allows — the shape choice in `bump_approval` is what's under test.
-        let policy = Arc::new(DefaultPolicyEngine::new(vec![], Arc::new(SystemClock)));
         let exec = Harness::default()
             .rpc(Arc::new(MockRpc {
                 tx_count: 4,
@@ -1228,14 +1227,15 @@ mod tests {
                 bump: Some(estimation(200, 1)),
                 ..Default::default()
             }))
-            .policy(policy)
+            .policy(Arc::new(DefaultPolicyEngine::new(
+                vec![],
+                Arc::new(SystemClock),
+            )))
             .store(store.clone())
             .bump_timeout(0)
             .executor();
-
         exec.escalate().await.unwrap();
-        // Bump succeeded (original + one bump broadcast) — proves the executor evaluated
-        // `Cancel`, not `Transaction`. Wrong choice would have left broadcasts.len() == 1.
+
         assert_eq!(store.all()[0].broadcasts.len(), 2);
     }
 

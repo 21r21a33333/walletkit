@@ -56,7 +56,12 @@ where
 fn is_terminal(status: &Option<TxStatus>) -> bool {
     matches!(
         status,
-        Some(TxStatus::Confirmed { .. }) | Some(TxStatus::Failed { .. }) | Some(TxStatus::Replaced)
+        Some(
+            TxStatus::Confirmed { .. }
+                | TxStatus::Failed { .. }
+                | TxStatus::Replaced
+                | TxStatus::Dropped
+        )
     )
 }
 
@@ -254,6 +259,32 @@ async fn restart_reconciles_a_tx_mined_during_downtime(net: Localnet) {
     );
 }
 
+async fn cancel_settles_original_as_dropped(net: Localnet) {
+    net.no_auto_mine().await;
+
+    let target = net.wallet.send(&net.intent(1)).await.expect("send");
+    assert_eq!(target.nonce, 0);
+
+    let cancel = net.wallet.cancel(target.id).await.expect("cancel");
+    assert_eq!(cancel.nonce, target.nonce);
+
+    let cancel_status = settle(&net, cancel.id, 8).await;
+    assert!(
+        matches!(cancel_status, Some(TxStatus::Confirmed { .. })),
+        "cancel Confirmed, got {cancel_status:?}"
+    );
+    // Dropped, not Replaced — a foreign displacement would settle Replaced.
+    let target_status = settle(&net, target.id, 8).await;
+    assert!(
+        matches!(target_status, Some(TxStatus::Dropped)),
+        "original Dropped, got {target_status:?}"
+    );
+
+    let fresh = net.wallet.send(&net.intent(2)).await.expect("fresh send");
+    assert_eq!(fresh.nonce, 1);
+    assert_confirms(&net, fresh.id).await;
+}
+
 async fn every_tx_settles_within_bounded_ticks(net: Localnet) {
     let handle = net.wallet.send(&net.intent(1)).await.expect("send");
     let status = settle(&net, handle.id, 10).await;
@@ -272,4 +303,5 @@ localnet_matrix! {
     reorg_unmines_without_false_confirm_then_recovers { account: 6, confirmations: 3 },
     restart_reconciles_a_tx_mined_during_downtime   { account: 7, confirmations: 1 },
     every_tx_settles_within_bounded_ticks           { account: 8, confirmations: 1 },
+    cancel_settles_original_as_dropped              { account: 9, confirmations: 1 },
 }
