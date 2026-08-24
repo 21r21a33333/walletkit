@@ -223,7 +223,7 @@ impl Transport {
     ) -> Result<Transport, TransportBuildError> {
         let url = vendor_url(vendor, api_key, chain_id)
             .ok_or(TransportBuildError::UnknownChain(chain_id))?;
-        Transport::single(url)
+        Transport::url(url)
     }
 }
 

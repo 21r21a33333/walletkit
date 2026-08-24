@@ -30,7 +30,7 @@ impl Transport {
     }
 
     /// A single HTTP endpoint with defaults — the recommended eRPC setup.
-    pub fn single(url: Url) -> Result<Self, TransportBuildError> {
+    pub fn url(url: Url) -> Result<Self, TransportBuildError> {
         TransportBuilder::new(url).build()
     }
 

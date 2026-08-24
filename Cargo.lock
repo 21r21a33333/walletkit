@@ -81,6 +81,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-contract"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b86722084d6d07822a6c67e39ae794d437fb9de12fa4127d4f9fd93f89651121"
+dependencies = [
+ "alloy-consensus",
+ "alloy-dyn-abi",
+ "alloy-json-abi",
+ "alloy-network",
+ "alloy-network-primitives",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
+ "alloy-transport",
+ "futures",
+ "futures-util",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "wasmtimer",
+]
+
+[[package]]
 name = "alloy-dyn-abi"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -170,6 +195,20 @@ dependencies = [
  "serde",
  "serde_with",
  "sha2",
+]
+
+[[package]]
+name = "alloy-ens"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be9aa797694e7c55b007aa8f172daef76a83272cbedb8800bdc7038eed3bdb1a"
+dependencies = [
+ "alloy-contract",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-sol-types",
+ "async-trait",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -5735,8 +5774,10 @@ name = "walletkit"
 version = "0.0.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-contract",
  "alloy-dyn-abi",
  "alloy-eips",
+ "alloy-ens",
  "alloy-node-bindings",
  "alloy-primitives",
  "alloy-provider",
@@ -5744,6 +5785,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-signer",
  "alloy-signer-local",
+ "alloy-sol-types",
  "alloy-transport",
  "alloy-transport-http",
  "async-trait",

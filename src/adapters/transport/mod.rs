@@ -1,7 +1,7 @@
 //! `Transport` — the one concrete [`Rpc`] adapter. It wraps an alloy provider
 //! (type-erased into a [`DynProvider`], so the struct is concrete and non-generic)
 //! and reuses alloy's transport layers for reliability. Construction lives in
-//! [`build`]: [`Transport::builder`] for full control, [`Transport::single`] for a
+//! [`build`]: [`Transport::builder`] for full control, [`Transport::url`] for a
 //! single HTTP endpoint, or [`Transport::from_config`] from a declarative
 //! [`TransportConfig`] (per-chain, config-file friendly).
 //!
@@ -12,7 +12,7 @@
 //! *stateful/coordinated* features — reorg-aware caching, cross-upstream quorum,
 //! provider auto-discovery, per-method routing — are **not** reimplemented here;
 //! run **[eRPC](https://github.com/erpc/erpc)** and point one endpoint at it
-//! (`Transport::single(erpc_url)`). Per chain, hold a `chain_id -> Transport` map
+//! (`Transport::url(erpc_url)`). Per chain, hold a `chain_id -> Transport` map
 //! (assembled by the facade) built from one [`TransportConfig`] each.
 
 mod build;
@@ -21,17 +21,27 @@ mod chains;
 pub use build::{TransportBuildError, TransportBuilder, TransportConfig};
 pub use chains::{Vendor, public_rpcs, refresh_public_endpoints, vendor_url};
 
-use crate::core::deps::{Rpc, RpcError};
+use crate::core::deps::{Rpc, RpcError, Simulated};
 use alloy_eips::BlockId;
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, TxHash};
 use alloy_provider::{DynProvider, Provider};
-use alloy_rpc_types_eth::{TransactionReceipt, TransactionRequest};
+use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
 use alloy_transport::{RpcError as AlloyRpcError, TransportError};
 use async_trait::async_trait;
 
 pub struct Transport {
     provider: DynProvider,
+}
+
+impl Transport {
+    /// A clone of the resilient provider this transport wraps, for read-only adapters
+    /// ([`RpcReadClient`](crate::adapters::RpcReadClient), ENS) that need typed
+    /// `sol!`/multicall access yet must inherit the same failover/retry/hedge as the
+    /// write path. `DynProvider` is `Arc`-backed, so the clone is cheap.
+    pub fn provider(&self) -> DynProvider {
+        self.provider.clone()
+    }
 }
 
 #[async_trait]
@@ -99,6 +109,28 @@ impl Rpc for Transport {
             .map_err(rpc_err)
     }
 
+    async fn call(&self, request: &TransactionRequest) -> Result<Simulated, RpcError> {
+        match self.provider.call(request.clone()).await {
+            Ok(data) => Ok(Simulated::Returned(data)),
+            // A contract revert carries its data on the JSON-RPC error; surface that as a
+            // successful simulation. Anything without revert data is a real transport error.
+            Err(e) => match e.as_error_resp().and_then(|resp| resp.as_revert_data()) {
+                Some(revert) => Ok(Simulated::Reverted(revert)),
+                None => Err(rpc_err(e)),
+            },
+        }
+    }
+
+    async fn create_access_list(
+        &self,
+        request: &TransactionRequest,
+    ) -> Result<AccessListResult, RpcError> {
+        self.provider
+            .create_access_list(request)
+            .await
+            .map_err(rpc_err)
+    }
+
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError> {
         let pending = self
             .provider
@@ -118,8 +150,8 @@ impl Rpc for Transport {
 
 /// Map an alloy transport error to our port error. A transport-level failure
 /// (network/timeout/5xx/429, via alloy's `is_retry_err`) is transient/retryable; a
-/// JSON-RPC method error (e.g. "nonce too low") is terminal.
-fn rpc_err(e: TransportError) -> RpcError {
+/// JSON-RPC method error (e.g. "nonce too low") is terminal. Shared with the read adapter.
+pub(crate) fn rpc_err(e: TransportError) -> RpcError {
     let transient = matches!(&e, AlloyRpcError::Transport(kind) if kind.is_retry_err());
     RpcError::Call {
         transient,
