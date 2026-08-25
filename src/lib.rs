@@ -16,12 +16,18 @@
 //! xpubs, counterfactual [`predict_address`](core::accounts::predict_address), gap-limit
 //! account discovery (one batched round-trip per window), and encrypted keystore export.
 //!
+//! Start with [`Wallet::connect_http`] and `use walletkit::prelude::*;` — the [`prelude`]
+//! brings the facade, the port traits, and the common alloy value/unit types into scope.
+//!
 //! [alloy]: https://github.com/alloy-rs
 
 pub mod adapters;
 pub mod core;
 pub mod error;
 pub mod facade;
+pub mod prelude;
+pub mod types;
+pub mod units;
 
 pub(crate) mod obs;
 
