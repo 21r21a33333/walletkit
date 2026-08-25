@@ -1,7 +1,7 @@
 //! `AccountManager` — a seed-owning HD account factory. Holds one BIP-39 mnemonic in
 //! zeroizing memory and derives accounts/signers under it. A derived account's private key
-//! is materialized only inside alloy's signer (never exported here), so the F1
-//! signature-only invariant holds; this type only *constructs* signers.
+//! is materialized only inside alloy's signer (never exported here); this type only
+//! *constructs* signers, so the signature-only, no-export invariant holds.
 
 use crate::adapters::LocalSigner;
 use crate::core::accounts::{
@@ -132,7 +132,8 @@ impl AccountManager {
         self.labels.insert(index, name.into());
     }
 
-    /// The account whose label matches `name`, if any.
+    /// The account whose label matches `name`, if any. Labels are assumed unique; on a
+    /// collision an arbitrary match is returned.
     pub fn account_by_label(&self, name: &str) -> Option<Account> {
         self.labels
             .iter()

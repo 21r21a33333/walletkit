@@ -1,6 +1,5 @@
 //! Pure account-management domain types: HD path schemes, word counts, derived-account
-//! records, and watch-only extended public keys. Zero I/O. `AccountError` grows one variant
-//! per consumer as the slice fills in.
+//! records, and watch-only extended public keys. Zero I/O.
 
 use crate::core::deps::ReadClient;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -59,17 +58,6 @@ impl WordCount {
             Self::W24 => 32,
         }
     }
-
-    /// The number of words in the mnemonic.
-    pub fn words(&self) -> usize {
-        match self {
-            Self::W12 => 12,
-            Self::W15 => 15,
-            Self::W18 => 18,
-            Self::W21 => 21,
-            Self::W24 => 24,
-        }
-    }
 }
 
 /// A derived account: its address and how it was derived. Carries no key material — a
@@ -105,24 +93,14 @@ pub fn derive_address(xpub: &AccountXpub, index: u32) -> Result<Address, Account
     Ok(public_key_to_address(child.as_ref()))
 }
 
-/// The ERC-4337 EntryPoint version a factory targets. Governs how deploy data is expressed:
-/// a single packed `initCode` (v0.6) or split `factory` + `factoryData` (v0.7).
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryPointVersion {
-    V0_6,
-    V0_7,
-}
-
 /// Deploy data for a counterfactual smart account: exactly what a later ERC-4337 deploy and
-/// an EIP-6492 signature wrapper need. Canonical form is the v0.7 split; the v0.6 `initCode`
-/// view is `factory ++ factory_data`.
+/// an EIP-6492 signature wrapper need. Holds the v0.7 `factory`/`factoryData` split; the v0.6
+/// packed `initCode` view is `factory ++ factory_data`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployData {
     pub factory: Address,
     pub factory_data: Bytes,
-    pub entry_point_version: EntryPointVersion,
 }
 
 impl DeployData {
@@ -243,8 +221,8 @@ pub struct DiscoveredAccounts {
     pub partial: bool,
 }
 
-/// Account-management failures. `#[non_exhaustive]` and grown per consumer; the public
-/// boundary maps this into `WalletKitError`. An error never carries seed material.
+/// Account-management failures. The public boundary maps this into `WalletKitError`; an
+/// error never carries seed material.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AccountError {
@@ -348,7 +326,6 @@ mod tests {
         let d = DeployData {
             factory: alloy_primitives::address!("0x1111111111111111111111111111111111111111"),
             factory_data: alloy_primitives::bytes!("0xabcd"),
-            entry_point_version: EntryPointVersion::V0_6,
         };
         assert_eq!(
             d.init_code(),
