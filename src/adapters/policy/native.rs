@@ -122,6 +122,16 @@ impl Policy for TypedDataDomainAllowlist {
     }
 }
 
+/// **DEV/TEST ONLY** — grants every request. Composing this into a real policy defeats the
+/// entire guardrail; it exists solely to back [`Wallet::connect_http_dev`](crate::Wallet::connect_http_dev).
+pub struct AllowAll;
+
+impl Policy for AllowAll {
+    fn check(&self, _request: &SigningRequest) -> Verdict {
+        Verdict::Allow
+    }
+}
+
 /// The zero-dependency default engine: composes native [`Policy`] rules with a
 /// deny-over-allow, default-deny fold. Frozen — new capability comes from other
 /// engines, not more built-in predicates.

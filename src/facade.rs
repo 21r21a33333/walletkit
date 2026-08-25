@@ -4,8 +4,9 @@
 //! is structural. Host-driven: [`tick`](Wallet::tick) runs one recover→confirm→escalate
 //! pass; a background runner is opt-in sugar.
 
+use crate::adapters::policy::{AllowAll, DefaultPolicyEngine};
 use crate::adapters::{
-    InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock,
+    InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock, Transport,
 };
 use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use crate::core::wallet::{
@@ -51,6 +52,35 @@ impl Wallet {
             gas_buffer_pct: None,
             refill_on_replaced: false,
         }
+    }
+
+    /// The common case in one call: build the HTTP transport from `url`, wrap `signer` and
+    /// `policy`, and apply the default tracking config. Fallible only where inputs can be bad
+    /// — a malformed URL or a transport that won't build. The policy stays explicit; the
+    /// guardrail is never defaulted away.
+    pub fn connect_http(
+        url: &str,
+        signer: impl Signer + 'static,
+        policy: impl PolicyEngine + 'static,
+    ) -> Result<Wallet, WalletKitError> {
+        let parsed = url
+            .parse::<url::Url>()
+            .map_err(|e| WalletKitError::Connect(e.to_string()))?;
+        let transport =
+            Transport::url(parsed).map_err(|e| WalletKitError::Connect(e.to_string()))?;
+        Ok(Wallet::builder(Arc::new(transport), Arc::new(signer), Arc::new(policy)).build())
+    }
+
+    /// **DEV/TEST ONLY** — like [`connect_http`](Self::connect_http) but with an allow-all
+    /// policy, so every intent is permitted. Named loudly so shipping it to production is a
+    /// deliberate choice, never an accidental default. Use [`connect_http`](Self::connect_http)
+    /// with a real [`PolicyEngine`] anywhere the guardrail matters.
+    pub fn connect_http_dev(
+        url: &str,
+        signer: impl Signer + 'static,
+    ) -> Result<Wallet, WalletKitError> {
+        let policy = DefaultPolicyEngine::new(vec![Box::new(AllowAll)], Arc::new(SystemClock));
+        Self::connect_http(url, signer, policy)
     }
 
     /// The account this wallet signs for.
