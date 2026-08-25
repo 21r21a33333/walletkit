@@ -78,6 +78,19 @@ pub enum Decision {
     Deny(PolicyRejection),
 }
 
+/// The token-free result of a policy dry-run
+/// ([`validate`](crate::core::deps::PolicyEngine::validate)). It deliberately carries **no**
+/// [`PolicyApproval`] — a preview can never be turned into a signing capability, so the gate
+/// cannot be bypassed by inspecting a validation. The deny reason mirrors a real
+/// [`Decision::Deny`]. `#[non_exhaustive]` so a future `WouldRequireApproval` can land without
+/// breaking callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PolicyOutcome {
+    WouldAllow,
+    WouldDeny(PolicyRejection),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
