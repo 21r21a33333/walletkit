@@ -192,6 +192,57 @@ pub fn safe_salt(initializer: &[u8], salt_nonce: U256) -> B256 {
     keccak256(buf)
 }
 
+/// What marks a derived address "used". `NonceOnly` counts outbound activity (nonce > 0);
+/// `NonceOrBalance` also counts a non-zero native balance to catch receive-only addresses
+/// (misses ERC-20-only recipients — a documented residual gap). Both signals come from one
+/// batched [`account_activity`](crate::core::deps::Rpc::account_activity) call per window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsedPredicate {
+    NonceOnly,
+    NonceOrBalance,
+}
+
+/// Options for [`AccountManager::discover`](crate::adapters::AccountManager::discover).
+#[derive(Clone)]
+pub struct DiscoveryOpts {
+    /// Path schemes to enumerate; results are unioned (default `[Bip44Standard]`).
+    pub schemes: Vec<PathScheme>,
+    /// Stop after this many consecutive unused indices (BIP-44 default 20).
+    pub gap_limit: usize,
+    /// Hard scan bound; hitting it marks the result partial.
+    pub max_index: usize,
+    pub used: UsedPredicate,
+    /// First index to probe (for resuming a scan).
+    pub start_index: usize,
+}
+
+impl Default for DiscoveryOpts {
+    fn default() -> Self {
+        Self {
+            schemes: vec![PathScheme::Bip44Standard],
+            gap_limit: 20,
+            max_index: 256,
+            used: UsedPredicate::NonceOrBalance,
+            start_index: 0,
+        }
+    }
+}
+
+/// The outcome of a discovery scan.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct DiscoveredAccounts {
+    /// Used accounts, index-ordered and deduplicated across schemes.
+    pub accounts: Vec<Account>,
+    /// The highest index probed.
+    pub scanned_to: u32,
+    /// Stopped at `max_index` rather than the gap — the result is partial.
+    pub hit_max_index: bool,
+    /// A chain/RPC errored mid-scan; usage can only be hidden, never invented, so results
+    /// are a lower bound.
+    pub partial: bool,
+}
+
 /// Account-management failures. `#[non_exhaustive]` and grown per consumer; the public
 /// boundary maps this into `WalletKitError`. An error never carries seed material.
 #[derive(Debug, thiserror::Error)]
@@ -209,6 +260,9 @@ pub enum AccountError {
     /// A read failed during an on-chain check (e.g. `predict_address_checked`).
     #[error(transparent)]
     Read(#[from] crate::core::deps::ReadError),
+    /// An RPC failed during account discovery.
+    #[error(transparent)]
+    Rpc(#[from] crate::core::deps::RpcError),
 }
 
 #[cfg(test)]

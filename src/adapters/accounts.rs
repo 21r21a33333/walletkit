@@ -4,13 +4,18 @@
 //! signature-only invariant holds; this type only *constructs* signers.
 
 use crate::adapters::LocalSigner;
-use crate::core::accounts::{Account, AccountError, AccountXpub, PathScheme, WordCount};
+use crate::core::accounts::{
+    Account, AccountError, AccountXpub, DiscoveredAccounts, DiscoveryOpts, PathScheme,
+    UsedPredicate, WordCount,
+};
+use crate::core::deps::{AccountActivity, Rpc};
 use alloy_primitives::Address;
 use alloy_signer::utils::public_key_to_address;
 use coins_bip39::{English, Entropy, Mnemonic};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Owns a BIP-39 mnemonic (+ optional passphrase) and derives accounts under one seed.
@@ -144,6 +149,95 @@ impl AccountManager {
             .map_err(|e| AccountError::Derivation(e.to_string()))?;
         Ok(AccountXpub(xpriv.verify_key()))
     }
+
+    /// Scan the seed for used accounts across `chains` (union): derive index `i` per scheme,
+    /// mark it used if `nonce > 0` (and, for `NonceOrBalance`, `|| native_balance > 0`) on any
+    /// chain, and stop after `gap_limit` consecutive unused. Indices are probed in
+    /// `gap_limit`-sized windows, each a **single batched round-trip per chain**
+    /// ([`account_activity`](crate::core::deps::Rpc::account_activity)). Always explicit —
+    /// never run on construction, since a scan reveals the whole address set to the RPC.
+    pub async fn discover(
+        &self,
+        chains: &[Arc<dyn Rpc>],
+        opts: DiscoveryOpts,
+    ) -> Result<DiscoveredAccounts, AccountError> {
+        let mut found: BTreeMap<Address, Account> = BTreeMap::new();
+        let mut scanned_to = 0u32;
+        let mut hit_max_index = false;
+        let mut partial = false;
+        let window = opts.gap_limit.max(1); // look ahead a full gap at a time
+
+        for scheme in &opts.schemes {
+            let mut consecutive_unused = 0usize;
+            let mut i = opts.start_index;
+            'scheme: while i < opts.max_index {
+                let end = (i + window).min(opts.max_index);
+                let mut entries: Vec<(u32, String, Address)> = Vec::with_capacity(end - i);
+                for x in i..end {
+                    let idx = x as u32;
+                    let path = scheme.path_for(idx)?;
+                    let address = self.address_at_path(&path)?;
+                    entries.push((idx, path, address));
+                }
+                let addrs: Vec<Address> = entries.iter().map(|e| e.2).collect();
+
+                // Union "used" across chains, one batch per chain. A chain outage can only
+                // hide usage, never invent it — flag partial and leave those entries unused.
+                let mut used = vec![false; addrs.len()];
+                for chain in chains {
+                    match chain.account_activity(&addrs).await {
+                        Ok(activity) => {
+                            for (k, act) in activity.iter().enumerate() {
+                                if is_used(act, opts.used) {
+                                    used[k] = true;
+                                }
+                            }
+                        }
+                        Err(_) => partial = true,
+                    }
+                }
+
+                for (k, (idx, path, address)) in entries.into_iter().enumerate() {
+                    scanned_to = scanned_to.max(idx);
+                    if used[k] {
+                        consecutive_unused = 0;
+                        found.entry(address).or_insert(Account {
+                            index: idx,
+                            label: self.labels.get(&idx).cloned(),
+                            address,
+                            path,
+                        });
+                    } else {
+                        consecutive_unused += 1;
+                        if consecutive_unused >= opts.gap_limit {
+                            break 'scheme;
+                        }
+                    }
+                }
+
+                // The bound, not the gap, ended the scan → the result is partial.
+                if end == opts.max_index {
+                    hit_max_index = true;
+                    break 'scheme;
+                }
+                i = end;
+            }
+        }
+
+        let mut accounts: Vec<Account> = found.into_values().collect();
+        accounts.sort_by_key(|a| a.index);
+        Ok(DiscoveredAccounts {
+            accounts,
+            scanned_to,
+            hit_max_index,
+            partial,
+        })
+    }
+}
+
+/// Whether one account's activity counts as "used" under the predicate.
+fn is_used(act: &AccountActivity, pred: UsedPredicate) -> bool {
+    act.nonce > 0 || (pred == UsedPredicate::NonceOrBalance && !act.balance.is_zero())
 }
 
 #[cfg(test)]
