@@ -6,9 +6,9 @@
 //! [`CallLog`] across mocks to assert pipeline ordering.
 
 use crate::core::deps::{
-    Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
-    PolicyEngineError, Rpc, RpcError, Signer, SignerError, Simulated, StateStore, StateStoreError,
-    SubmissionError, SubmissionStrategy, Versioned,
+    AccountActivity, Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError,
+    PolicyEngine, PolicyEngineError, Rpc, RpcError, Signer, SignerError, Simulated, StateStore,
+    StateStoreError, SubmissionError, SubmissionStrategy, Versioned,
 };
 use crate::core::wallet::{
     AccountExecutor, Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope,
@@ -459,6 +459,18 @@ impl Rpc for MockRpc {
             Some(receipt) => Ok(Some(receipt.clone())),
             None => Ok(self.receipt.clone()),
         }
+    }
+    async fn account_activity(
+        &self,
+        accounts: &[Address],
+    ) -> Result<Vec<AccountActivity>, RpcError> {
+        Ok(accounts
+            .iter()
+            .map(|_| AccountActivity {
+                nonce: self.tx_count,
+                balance: U256::ZERO,
+            })
+            .collect())
     }
 }
 

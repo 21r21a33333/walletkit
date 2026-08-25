@@ -1,7 +1,15 @@
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::{Address, B256, Bytes, TxHash};
+use alloy_primitives::{Address, B256, Bytes, TxHash, U256};
 use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
 use async_trait::async_trait;
+
+/// One account's activity signals, fetched together for account discovery: the mined
+/// transaction count (nonce) and the native balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountActivity {
+    pub nonce: u64,
+    pub balance: U256,
+}
 
 /// The result of an `eth_call` simulation. A contract **revert is a normal outcome** here
 /// (it carries the revert data for the caller to decode), not an error — only a transport
@@ -50,6 +58,12 @@ pub trait Rpc: Send + Sync {
     ) -> Result<AccessListResult, RpcError>;
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError>;
     async fn receipt(&self, tx: TxHash) -> Result<Option<TransactionReceipt>, RpcError>;
+    /// `(nonce, native balance)` for many accounts in **one JSON-RPC batch** round-trip —
+    /// the account-discovery scan primitive. Results align 1:1 with `accounts`.
+    async fn account_activity(
+        &self,
+        accounts: &[Address],
+    ) -> Result<Vec<AccountActivity>, RpcError>;
 }
 
 #[derive(Debug, thiserror::Error)]

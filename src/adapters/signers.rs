@@ -1,7 +1,9 @@
 //! `Signer` backends over alloy's [`PrivateKeySigner`]. The loaders (raw key, env
 //! var, keystore file, HD mnemonic) are just ways to load the same key type. "Key
 //! never leaves" is structural: the [`Signer`] port has no export method and the
-//! private key stays inside alloy.
+//! private key stays inside alloy. The one write direction,
+//! [`export_keystore`](LocalSigner::export_keystore), emits an **encrypted** keystore —
+//! the plaintext key never crosses the boundary.
 
 use crate::core::deps::{Signer, SignerError};
 use crate::core::wallet::{
@@ -14,7 +16,8 @@ use alloy_signer::SignerSync;
 use alloy_signer_local::coins_bip39::English;
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner};
 use async_trait::async_trait;
-use std::path::Path;
+use rand::rngs::OsRng;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 pub struct LocalSigner {
@@ -44,6 +47,19 @@ impl LocalSigner {
         })
     }
 
+    /// Encrypt this account's key into a Web3 Secret Storage / EIP-2335 keystore JSON
+    /// (scrypt + AES-128-CTR — the MetaMask/Geth/Foundry format) written under `dir`;
+    /// returns the file path. Reuse [`from_keystore`](Self::from_keystore) to load it back.
+    pub fn export_keystore(&self, dir: &Path, password: &str) -> Result<PathBuf, SignerError> {
+        // Copy the key into a zeroizing buffer for the encrypt call; the plaintext never
+        // returns to the caller — only the encrypted file does.
+        let key = Zeroizing::new(self.inner.to_bytes().to_vec());
+        let (_, name) =
+            PrivateKeySigner::encrypt_keystore(dir, &mut OsRng, key.as_slice(), password, None)
+                .map_err(load)?;
+        Ok(dir.join(name))
+    }
+
     /// Derive from a BIP-39 mnemonic at BIP-44 `m/44'/60'/0'/0/{index}`.
     pub fn from_mnemonic(phrase: &str, index: u32) -> Result<Self, SignerError> {
         let inner = MnemonicBuilder::<English>::default()
@@ -53,6 +69,26 @@ impl LocalSigner {
             .build()
             .map_err(load)?;
         Ok(Self { inner })
+    }
+
+    /// Derive from a BIP-39 mnemonic at an explicit derivation path, with an optional
+    /// passphrase (the BIP-39 "25th word"). The private key is materialized only inside
+    /// alloy's `PrivateKeySigner`, so the no-export invariant holds.
+    pub fn from_mnemonic_path(
+        phrase: &str,
+        path: &str,
+        password: Option<&str>,
+    ) -> Result<Self, SignerError> {
+        let mut builder = MnemonicBuilder::<English>::default()
+            .phrase(phrase)
+            .derivation_path(path)
+            .map_err(load)?;
+        if let Some(pw) = password {
+            builder = builder.password(pw);
+        }
+        Ok(Self {
+            inner: builder.build().map_err(load)?,
+        })
     }
 
     /// The structural gate shared by every signing method: the approval must bind this
@@ -259,5 +295,17 @@ mod tests {
                 .await,
             Err(SignerError::ApprovalMismatch)
         ));
+    }
+
+    #[test]
+    fn keystore_round_trip_recovers_the_address_and_rejects_wrong_password() {
+        let signer = LocalSigner::from_mnemonic(MNEMONIC, 0).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = signer.export_keystore(dir.path(), "pw").unwrap();
+        assert_eq!(
+            LocalSigner::from_keystore(&path, "pw").unwrap().address(),
+            signer.address()
+        );
+        assert!(LocalSigner::from_keystore(&path, "wrong").is_err());
     }
 }

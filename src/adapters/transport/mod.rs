@@ -21,11 +21,12 @@ mod chains;
 pub use build::{TransportBuildError, TransportBuilder, TransportConfig};
 pub use chains::{Vendor, public_rpcs, refresh_public_endpoints, vendor_url};
 
-use crate::core::deps::{Rpc, RpcError, Simulated};
-use alloy_eips::BlockId;
+use crate::core::deps::{AccountActivity, Rpc, RpcError, Simulated};
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::{Address, B256, Bytes, TxHash};
+use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_primitives::{Address, B256, Bytes, TxHash, U256};
 use alloy_provider::{DynProvider, Provider};
+use alloy_rpc_client::BatchRequest;
 use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
 use alloy_transport::{RpcError as AlloyRpcError, TransportError};
 use async_trait::async_trait;
@@ -145,6 +146,39 @@ impl Rpc for Transport {
             .get_transaction_receipt(tx)
             .await
             .map_err(rpc_err)
+    }
+
+    async fn account_activity(
+        &self,
+        accounts: &[Address],
+    ) -> Result<Vec<AccountActivity>, RpcError> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One JSON-RPC batch carries eth_getTransactionCount + eth_getBalance for every
+        // account, so a discovery window is a single HTTP round-trip. `send()` yields a
+        // 'static future, so the client borrow is released before the await.
+        let mut batch = BatchRequest::new(self.provider.client());
+        let mut waiters = Vec::with_capacity(accounts.len());
+        for &account in accounts {
+            let params = (account, BlockNumberOrTag::Latest);
+            let nonce = batch
+                .add_call::<_, U256>("eth_getTransactionCount", &params)
+                .map_err(rpc_err)?;
+            let balance = batch
+                .add_call::<_, U256>("eth_getBalance", &params)
+                .map_err(rpc_err)?;
+            waiters.push((nonce, balance));
+        }
+        batch.send().await.map_err(rpc_err)?;
+        let mut out = Vec::with_capacity(accounts.len());
+        for (nonce, balance) in waiters {
+            out.push(AccountActivity {
+                nonce: nonce.await.map_err(rpc_err)?.saturating_to::<u64>(),
+                balance: balance.await.map_err(rpc_err)?,
+            });
+        }
+        Ok(out)
     }
 }
 

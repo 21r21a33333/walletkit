@@ -29,6 +29,12 @@ All notable changes to walletkit are documented here. The format follows
   create_access_list, decoded `RevertReason`; a revert is not an error). `EnsResolver`
   (forward-verified reverse). Opt-in `pricing` feature: token-list metadata + Chainlink
   price with per-feed staleness.
+- **HD account management** (#9): `AccountManager` — BIP-39 seed generate/restore
+  (fail-closed CSPRNG, zeroized, redacted), multi-account BIP-44/Ledger-Live derivation,
+  watch-only account xpubs + keyless `derive_address`, counterfactual `predict_address`
+  (CREATE2 + ERC-4337/6492 deploy data, Safe salt helper), gap-limit account discovery
+  (batched `Rpc::account_activity` — one JSON-RPC round-trip per window, multi-chain union),
+  account labels, and encrypted keystore export (`LocalSigner::export_keystore`).
 - **Repository maintenance** (#2): dual MIT/Apache-2.0 license, CI (fmt/clippy/test),
   MSRV pin, contributor/security docs, issue/PR templates.
 
