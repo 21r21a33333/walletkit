@@ -35,6 +35,12 @@ All notable changes to walletkit are documented here. The format follows
   (CREATE2 + ERC-4337/6492 deploy data, Safe salt helper), gap-limit account discovery
   (batched `Rpc::account_activity` — one JSON-RPC round-trip per window, multi-chain union),
   account labels, and encrypted keystore export (`LocalSigner::export_keystore`).
+- **Ergonomics / DX** (#10): `Wallet::connect_http` (one-line construction, policy explicit)
+  and `connect_http_dev` (loud allow-all dev helper); `TxIntent::transfer`/`call`
+  constructors; a curated `prelude` plus `types`/`units` alloy re-exports (no direct alloy
+  dependency needed); `PolicyEngine::validate` → token-free `PolicyOutcome` and
+  `Wallet::validate` (the policy analog of `dry_run`, bypass-proof by construction); `Debug`
+  on `TxPreview`; runnable `examples/` and a compiled quickstart doctest.
 - **Repository maintenance** (#2): dual MIT/Apache-2.0 license, CI (fmt/clippy/test),
   MSRV pin, contributor/security docs, issue/PR templates.
 
