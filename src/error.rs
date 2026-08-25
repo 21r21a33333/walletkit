@@ -61,6 +61,10 @@ pub enum WalletKitError {
     /// A cancel could not proceed: the handle is unknown or already settled.
     #[error("cannot cancel: {reason}")]
     Cancel { reason: &'static str },
+    /// A convenience-constructor setup failure: a malformed RPC URL or a transport that
+    /// could not be built.
+    #[error("connection setup failed: {0}")]
+    Connect(String),
 }
 
 impl WalletKitError {
@@ -86,7 +90,8 @@ impl WalletKitError {
             | Self::PolicyEngine(_)
             | Self::Simulation { .. }
             | Self::AccountMismatch { .. }
-            | Self::Cancel { .. } => ErrorKind::Terminal,
+            | Self::Cancel { .. }
+            | Self::Connect(_) => ErrorKind::Terminal,
         }
     }
 

@@ -4,13 +4,14 @@
 //! is structural. Host-driven: [`tick`](Wallet::tick) runs one recover→confirm→escalate
 //! pass; a background runner is opt-in sugar.
 
+use crate::adapters::policy::{AllowAll, DefaultPolicyEngine};
 use crate::adapters::{
-    InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock,
+    InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock, Transport,
 };
 use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use crate::core::wallet::{
-    AccountExecutor, HandleId, SignatureEnvelope, TransactionManager, TxHandle, TxIntent,
-    TxPreview, TxStatus, dry_run,
+    AccountExecutor, HandleId, PolicyOutcome, SignatureEnvelope, SigningRequest,
+    TransactionManager, TxHandle, TxIntent, TxPreview, TxStatus, dry_run,
 };
 use crate::error::WalletKitError;
 use alloy_dyn_abi::TypedData;
@@ -27,6 +28,7 @@ pub struct Wallet {
     executor: AccountExecutor,
     store: Arc<dyn StateStore>,
     rpc: Arc<dyn Rpc>,
+    policy: Arc<dyn PolicyEngine>,
     account: Address,
 }
 
@@ -53,6 +55,35 @@ impl Wallet {
         }
     }
 
+    /// The common case in one call: build the HTTP transport from `url`, wrap `signer` and
+    /// `policy`, and apply the default tracking config. Fallible only where inputs can be bad
+    /// — a malformed URL or a transport that won't build. The policy stays explicit; the
+    /// guardrail is never defaulted away.
+    pub fn connect_http(
+        url: &str,
+        signer: impl Signer + 'static,
+        policy: impl PolicyEngine + 'static,
+    ) -> Result<Wallet, WalletKitError> {
+        let parsed = url
+            .parse::<url::Url>()
+            .map_err(|e| WalletKitError::Connect(e.to_string()))?;
+        let transport =
+            Transport::url(parsed).map_err(|e| WalletKitError::Connect(e.to_string()))?;
+        Ok(Wallet::builder(Arc::new(transport), Arc::new(signer), Arc::new(policy)).build())
+    }
+
+    /// **DEV/TEST ONLY** — like [`connect_http`](Self::connect_http) but with an allow-all
+    /// policy, so every intent is permitted. Named loudly so shipping it to production is a
+    /// deliberate choice, never an accidental default. Use [`connect_http`](Self::connect_http)
+    /// with a real [`PolicyEngine`] anywhere the guardrail matters.
+    pub fn connect_http_dev(
+        url: &str,
+        signer: impl Signer + 'static,
+    ) -> Result<Wallet, WalletKitError> {
+        let policy = DefaultPolicyEngine::new(vec![Box::new(AllowAll)], Arc::new(SystemClock));
+        Self::connect_http(url, signer, policy)
+    }
+
     /// The account this wallet signs for.
     pub fn account(&self) -> Address {
         self.account
@@ -77,6 +108,17 @@ impl Wallet {
         dry_run(self.rpc.as_ref(), intent)
             .await
             .map_err(WalletKitError::Rpc)
+    }
+
+    /// Dry-run this intent against the policy engine: **would** it be allowed, and if not,
+    /// why? The policy analog of [`dry_run`](Self::dry_run) — no signing, no broadcast, and
+    /// the returned [`PolicyOutcome`] cannot carry a signing capability. Advisory: the real
+    /// gate re-runs at send time, so a passing validate is never a guarantee.
+    pub async fn validate(&self, intent: &TxIntent) -> Result<PolicyOutcome, WalletKitError> {
+        self.policy
+            .validate(&SigningRequest::Transaction(intent.clone()))
+            .await
+            .map_err(WalletKitError::PolicyEngine)
     }
 
     /// Sign an EIP-191 `personal_sign` message (policy-gated; default-denied unless a rule
@@ -241,7 +283,7 @@ impl WalletBuilder {
             submission,
             store.clone(),
             gas_oracle,
-            self.policy,
+            self.policy.clone(),
             self.signer,
             clock,
             account,
@@ -261,6 +303,7 @@ impl WalletBuilder {
             executor,
             store,
             rpc: self.rpc,
+            policy: self.policy,
             account,
         }
     }
@@ -324,6 +367,38 @@ mod tests {
         assert!(matches!(
             gated.sign_message(msg).await,
             Err(WalletKitError::Policy(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_previews_the_policy_decision_without_signing() {
+        use crate::adapters::SystemClock;
+        use crate::adapters::policy::{DefaultPolicyEngine, TargetAllowlist};
+        use alloy_primitives::U256;
+
+        let allowed = Address::from([0x22; 20]);
+        let policy = Arc::new(DefaultPolicyEngine::new(
+            vec![Box::new(TargetAllowlist::new([allowed]))],
+            Arc::new(SystemClock),
+        ));
+        let wallet = Wallet::builder(
+            Arc::new(MockRpc::default()),
+            Arc::new(MockSigner::default()),
+            policy,
+        )
+        .build();
+        let account = wallet.account();
+
+        let ok = TxIntent::transfer(1, account, allowed, U256::from(1u64));
+        assert_eq!(
+            wallet.validate(&ok).await.unwrap(),
+            PolicyOutcome::WouldAllow
+        );
+
+        let bad = TxIntent::transfer(1, account, Address::from([0x99; 20]), U256::from(1u64));
+        assert!(matches!(
+            wallet.validate(&bad).await.unwrap(),
+            PolicyOutcome::WouldDeny(_)
         ));
     }
 }

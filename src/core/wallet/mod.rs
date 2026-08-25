@@ -15,7 +15,7 @@ pub(crate) use preview::dry_run;
 pub use preview::{RevertReason, SimOutcome, TxPreview, decode_revert};
 pub use primitives::{
     Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope, NonceState,
-    PolicyApproval, PolicyRejection, SignatureEnvelope, SigningError, SigningRequest,
-    SigningScheme, TxHandle, TxIntent, TxStatus, enforce_low_s, typed_data_hash,
+    PolicyApproval, PolicyOutcome, PolicyRejection, SignatureEnvelope, SigningError,
+    SigningRequest, SigningScheme, TxHandle, TxIntent, TxStatus, enforce_low_s, typed_data_hash,
 };
 pub use transaction_manager::{TransactionManager, TransactionManagerError};

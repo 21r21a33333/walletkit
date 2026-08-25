@@ -1,4 +1,4 @@
-use crate::core::wallet::{Decision, SigningRequest};
+use crate::core::wallet::{Decision, PolicyOutcome, SigningRequest};
 use async_trait::async_trait;
 
 /// The pre-sign gate for every [`SigningRequest`] — a tx, an EIP-191 message, or EIP-712
@@ -10,6 +10,25 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait PolicyEngine: Send + Sync {
     async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError>;
+
+    /// Side-effect-free dry-run: **would** this request be allowed, and if not, why? The
+    /// policy analog of [`Wallet::dry_run`](crate::Wallet::dry_run). Returns a
+    /// [`PolicyOutcome`], which structurally cannot carry an approval — a preview can never
+    /// become a signing path.
+    ///
+    /// The default routes through [`evaluate`](Self::evaluate) and drops the approval, which
+    /// is safe only because approval minting is pure construction. An engine whose `evaluate`
+    /// has real side effects (a remote call, a nonce reservation, a quorum request) MUST
+    /// override this with a genuinely non-minting path.
+    ///
+    /// `validate` is **advisory**: policy state can change between it and `evaluate` (TOCTOU),
+    /// so a passing dry-run must never short-circuit the real gate at sign time.
+    async fn validate(&self, request: &SigningRequest) -> Result<PolicyOutcome, PolicyEngineError> {
+        Ok(match self.evaluate(request).await? {
+            Decision::Allow(_) => PolicyOutcome::WouldAllow,
+            Decision::Deny(rejection) => PolicyOutcome::WouldDeny(rejection),
+        })
+    }
 }
 
 /// The native engine never errors (returns `Ok(Decision::Deny)`); these variants

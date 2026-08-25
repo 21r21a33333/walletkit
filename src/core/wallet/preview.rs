@@ -11,6 +11,7 @@ use alloy_rpc_types_eth::{AccessList, TransactionInput, TransactionRequest};
 use alloy_sol_types::{Panic, Revert, SolError};
 
 /// The outcome of simulating an intent without signing it.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct TxPreview {
     /// `eth_estimateGas` — advisory (a dry-run is a lower bound); `None` when the tx would
@@ -24,6 +25,7 @@ pub struct TxPreview {
     pub return_data: Bytes,
 }
 
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum SimOutcome {
     Success,
@@ -32,6 +34,7 @@ pub enum SimOutcome {
 
 /// A decoded `eth_call` revert. Standard selectors are named; anything else keeps its raw
 /// bytes for the caller to interpret (RPC-only — no provider needed to decode).
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum RevertReason {
     /// `Error(string)` — selector `0x08c379a0`.

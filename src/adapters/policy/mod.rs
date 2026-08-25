@@ -13,6 +13,6 @@ mod wasm;
 #[cfg(feature = "policy-moonpay")]
 pub use moonpay::MoonPayPolicyEngine;
 pub use native::{
-    DefaultPolicyEngine, MessageSigningAllowed, Policy, SpendLimit, TargetAllowlist,
+    AllowAll, DefaultPolicyEngine, MessageSigningAllowed, Policy, SpendLimit, TargetAllowlist,
     TypedDataDomainAllowlist, Verdict,
 };

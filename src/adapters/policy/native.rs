@@ -1,5 +1,7 @@
 use crate::core::deps::{Clock, PolicyEngine, PolicyEngineError};
-use crate::core::wallet::{Decision, GasEnvelope, PolicyApproval, PolicyRejection, SigningRequest};
+use crate::core::wallet::{
+    Decision, GasEnvelope, PolicyApproval, PolicyOutcome, PolicyRejection, SigningRequest,
+};
 use alloy_primitives::{Address, TxKind, U256};
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -122,6 +124,16 @@ impl Policy for TypedDataDomainAllowlist {
     }
 }
 
+/// **DEV/TEST ONLY** — grants every request. Composing this into a real policy defeats the
+/// entire guardrail; it exists solely to back [`Wallet::connect_http_dev`](crate::Wallet::connect_http_dev).
+pub struct AllowAll;
+
+impl Policy for AllowAll {
+    fn check(&self, _request: &SigningRequest) -> Verdict {
+        Verdict::Allow
+    }
+}
+
 /// The zero-dependency default engine: composes native [`Policy`] rules with a
 /// deny-over-allow, default-deny fold. Frozen — new capability comes from other
 /// engines, not more built-in predicates.
@@ -148,14 +160,15 @@ impl DefaultPolicyEngine {
         self
     }
 
-    /// Any `Deny` short-circuits (deny-over-allow); otherwise at least one `Allow` is
-    /// required to mint the approval bound to this request's payload (default-deny). A
+    /// The allow/deny decision **without minting** — the shared core of `evaluate` (which
+    /// mints on allow) and `validate` (which never mints). Any `Deny` short-circuits
+    /// (deny-over-allow); otherwise at least one `Allow` is required (default-deny), and a
     /// payload that won't hash is fail-closed as a deny.
-    fn decide(&self, request: &SigningRequest) -> Decision {
+    fn decide_outcome(&self, request: &SigningRequest) -> PolicyOutcome {
         let mut allowed = false;
         for p in &self.policies {
             match p.check(request) {
-                Verdict::Deny(r) => return Decision::Deny(r),
+                Verdict::Deny(r) => return PolicyOutcome::WouldDeny(r),
                 Verdict::Allow => allowed = true,
                 Verdict::Abstain => {}
             }
@@ -164,25 +177,45 @@ impl DefaultPolicyEngine {
         // your own tx); a rule `Deny` still short-circuits above.
         let cancel_ok = matches!(request, SigningRequest::Cancel(i) if i.is_self_send());
         if !allowed && !cancel_ok {
-            return Decision::Deny(PolicyRejection {
+            return PolicyOutcome::WouldDeny(PolicyRejection {
                 rule: "default-deny".into(),
                 field: None,
                 reason: "no policy granted permission".into(),
             });
         }
-        let Ok(payload_hash) = request.signing_hash() else {
-            return Decision::Deny(PolicyRejection {
-                rule: "malformed-payload".into(),
-                field: None,
-                reason: "signing payload could not be hashed".into(),
-            });
-        };
-        let valid_until = self.clock.now_unix() + self.approval_ttl;
-        Decision::Allow(PolicyApproval::mint(
-            payload_hash,
-            self.fee_caps,
-            valid_until,
-        ))
+        if request.signing_hash().is_err() {
+            return PolicyOutcome::WouldDeny(malformed_payload());
+        }
+        PolicyOutcome::WouldAllow
+    }
+
+    /// The signing decision: the shared `decide_outcome`, plus minting the approval bound to
+    /// this request's payload on allow.
+    fn decide(&self, request: &SigningRequest) -> Decision {
+        match self.decide_outcome(request) {
+            PolicyOutcome::WouldDeny(r) => Decision::Deny(r),
+            PolicyOutcome::WouldAllow => match request.signing_hash() {
+                Ok(payload_hash) => {
+                    let valid_until = self.clock.now_unix() + self.approval_ttl;
+                    Decision::Allow(PolicyApproval::mint(
+                        payload_hash,
+                        self.fee_caps,
+                        valid_until,
+                    ))
+                }
+                // Unreachable — `decide_outcome` already denies a payload that won't hash —
+                // but re-checked here so a mint can never proceed on a bad payload.
+                Err(_) => Decision::Deny(malformed_payload()),
+            },
+        }
+    }
+}
+
+fn malformed_payload() -> PolicyRejection {
+    PolicyRejection {
+        rule: "malformed-payload".into(),
+        field: None,
+        reason: "signing payload could not be hashed".into(),
     }
 }
 
@@ -190,6 +223,12 @@ impl DefaultPolicyEngine {
 impl PolicyEngine for DefaultPolicyEngine {
     async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError> {
         Ok(self.decide(request))
+    }
+
+    /// Genuine non-minting dry-run: the shared `decide_outcome`, so it always agrees with
+    /// `evaluate`'s decision (modulo TOCTOU) yet mints nothing.
+    async fn validate(&self, request: &SigningRequest) -> Result<PolicyOutcome, PolicyEngineError> {
+        Ok(self.decide_outcome(request))
     }
 }
 
@@ -397,6 +436,37 @@ mod tests {
         assert!(matches!(
             engine.evaluate(&typed_data(other)).await.unwrap(),
             Decision::Deny(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_agrees_with_evaluate_but_returns_a_token_free_outcome() {
+        let target = Address::from([0xaa; 20]);
+        let req = tx(TxKind::Call(target), U256::from(1u64));
+
+        // Allowed: evaluate mints an approval; validate returns the token-free WouldAllow.
+        let allow = DefaultPolicyEngine::new(
+            vec![Box::new(TargetAllowlist::new([target]))],
+            Arc::new(FixedClock),
+        );
+        assert!(matches!(
+            allow.evaluate(&req).await.unwrap(),
+            Decision::Allow(_)
+        ));
+        assert_eq!(
+            allow.validate(&req).await.unwrap(),
+            PolicyOutcome::WouldAllow
+        );
+
+        // Denied (default-deny, no allow rule): both agree, neither mints.
+        let deny = DefaultPolicyEngine::new(vec![], Arc::new(FixedClock));
+        assert!(matches!(
+            deny.evaluate(&req).await.unwrap(),
+            Decision::Deny(_)
+        ));
+        assert!(matches!(
+            deny.validate(&req).await.unwrap(),
+            PolicyOutcome::WouldDeny(_)
         ));
     }
 }

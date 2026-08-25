@@ -21,6 +21,30 @@ pub struct TxIntent {
 }
 
 impl TxIntent {
+    /// A value-only transfer of `value` wei from `account` to `to`.
+    pub fn transfer(chain_id: u64, account: Address, to: Address, value: U256) -> Self {
+        Self {
+            chain_id,
+            account,
+            to: TxKind::Call(to),
+            value,
+            input: Bytes::new(),
+            purpose: None,
+        }
+    }
+
+    /// A contract call to `to` carrying `input` calldata (and optional `value`).
+    pub fn call(chain_id: u64, account: Address, to: Address, value: U256, input: Bytes) -> Self {
+        Self {
+            chain_id,
+            account,
+            to: TxKind::Call(to),
+            value,
+            input,
+            purpose: None,
+        }
+    }
+
     /// Stable content hash policy/simulate/sign bind to. `serde_json` is
     /// deterministic for these alloy types (fixed field order, hex strings), so the
     /// hash is stable within a process — but it is not persisted across alloy
@@ -121,5 +145,19 @@ mod tests {
             None,
             "contract creation"
         );
+    }
+
+    #[test]
+    fn constructors_wrap_the_recipient_as_a_call() {
+        let acct = Address::from([0x11; 20]);
+        let to = Address::from([0x22; 20]);
+        let t = TxIntent::transfer(1, acct, to, U256::from(5u64));
+        assert_eq!(
+            (t.to, t.value, t.input.is_empty()),
+            (TxKind::Call(to), U256::from(5u64), true)
+        );
+        let c = TxIntent::call(1, acct, to, U256::ZERO, Bytes::from(vec![0xab, 0xcd]));
+        assert_eq!(c.to, TxKind::Call(to));
+        assert_eq!(c.input, Bytes::from(vec![0xab, 0xcd]));
     }
 }

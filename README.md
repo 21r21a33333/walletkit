@@ -6,6 +6,34 @@ It is a **client-side facade, not a custody service**: it integrates MPC/TEE sig
 
 See [SPEC.md](SPEC.md) for the full design specification: architecture, the 7-phase roadmap, locked decisions, and cross-cutting invariants.
 
+## Quickstart
+
+`use walletkit::prelude::*;` brings the facade, the port traits, and the common alloy
+value/unit types into scope. `Wallet::connect_http` wires the transport, signer, and policy
+in one call — the policy stays explicit (the guardrail is never defaulted away):
+
+```rust,no_run
+use std::sync::Arc;
+use walletkit::prelude::*;
+use walletkit::adapters::{LocalSigner, SystemClock};
+use walletkit::adapters::policy::{DefaultPolicyEngine, TargetAllowlist};
+
+let to = Address::from([0x22; 20]);
+let signer = LocalSigner::from_private_key("0x59c6…")?;
+// The recipient is the only allowed target.
+let policy = DefaultPolicyEngine::new(vec![Box::new(TargetAllowlist::new([to]))], Arc::new(SystemClock));
+let wallet = Wallet::connect_http("http://localhost:8545", signer, policy)?;
+
+let intent = TxIntent::transfer(1, wallet.account(), to, parse_ether("0.01")?);
+let handle = wallet.send(&intent).await?;
+```
+
+Runnable end-to-end examples live in [`examples/`](examples): `cargo run --example send_eth`,
+`read_balance`, `resolve_ens`, `hd_accounts`, `preview_and_validate`. For dev/tests,
+`Wallet::connect_http_dev(url, signer)` skips the policy with a loud, allow-all default.
+Preview before sending: `wallet.dry_run(&intent)` (what happens on-chain) and
+`wallet.validate(&intent)` (would the policy allow it).
+
 ## RPC layer — eRPC recommended
 
 walletkit's `Transport` reuses alloy's transport layers (retry/backoff + multi-endpoint
@@ -83,5 +111,6 @@ let wallet = Wallet::builder(rpc, std::sync::Arc::new(signer), policy).build();
 ## Status
 
 Design locked; Phase 1 (EVM Execution Core) implementation in progress — the read /
-preview / ENS / pricing DX seams (sub-project F1) and HD account management (F2) are
+preview / ENS / pricing DX seams (sub-project F1), HD account management (F2), and the
+ergonomics layer (F3: convenience constructors, prelude, policy `validate`, examples) are
 implemented.
