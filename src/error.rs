@@ -2,6 +2,7 @@
 //! contracts; `WalletKitError` is the one umbrella every `Wallet` operation returns,
 //! classified for retry with a machine-readable [`ErrorKind`].
 
+use crate::core::accounts::AccountError;
 use crate::core::deps::{
     EnsError, GasOracleError, NonceManagerError, PolicyEngineError, ReadError, RpcError,
     SignerError, StateStoreError, SubmissionError,
@@ -49,6 +50,10 @@ pub enum WalletKitError {
     /// An ENS resolution failed (transport, offchain-required, or resolution error).
     #[error(transparent)]
     Ens(EnsError),
+    /// An account-management operation failed (bad phrase/path, derivation, RNG, or a
+    /// discovery read).
+    #[error(transparent)]
+    Account(AccountError),
     #[error("simulation rejected: {reason}")]
     Simulation { reason: String },
     #[error("signer {signer} does not control the intent account {intent}")]
@@ -75,6 +80,7 @@ impl WalletKitError {
             Self::Ens(EnsError::OffchainLookupRequired | EnsError::Resolution { .. }) => {
                 ErrorKind::Terminal
             }
+            Self::Account(e) => account_kind(e),
             Self::Signer(_)
             | Self::Policy(_)
             | Self::PolicyEngine(_)
@@ -150,6 +156,15 @@ fn submission_kind(e: &SubmissionError) -> ErrorKind {
     }
 }
 
+fn account_kind(e: &AccountError) -> ErrorKind {
+    // A discovery read/RPC failure follows the transport's retry classification; a bad
+    // phrase/path/derivation/RNG failure is terminal.
+    match e {
+        AccountError::Rpc(e) | AccountError::Read(ReadError::Rpc(e)) => rpc_kind(e),
+        _ => ErrorKind::Terminal,
+    }
+}
+
 fn store_kind(e: &StateStoreError) -> ErrorKind {
     match e {
         StateStoreError::Backend { .. } | StateStoreError::Task(_) => ErrorKind::Retryable,
@@ -214,6 +229,12 @@ impl From<EnsError> for WalletKitError {
     }
 }
 
+impl From<AccountError> for WalletKitError {
+    fn from(e: AccountError) -> Self {
+        Self::Account(e)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +292,23 @@ mod tests {
         let r = e.policy_rejection().expect("policy rejection present");
         assert_eq!(r.rule, "spend_limit");
         assert_eq!(r.field.as_deref(), Some("value"));
+    }
+
+    #[test]
+    fn account_errors_classify_by_cause() {
+        // A bad phrase is terminal; a discovery RPC failure follows the transport class.
+        assert_eq!(
+            WalletKitError::Account(AccountError::InvalidPhrase).kind(),
+            ErrorKind::Terminal
+        );
+        assert_eq!(
+            WalletKitError::Account(AccountError::Rpc(RpcError::Call {
+                message: "timeout".into(),
+                transient: true,
+            }))
+            .kind(),
+            ErrorKind::Retryable
+        );
     }
 
     #[test]

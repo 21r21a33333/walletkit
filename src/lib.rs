@@ -11,6 +11,11 @@
 //! simulation with decoded revert reasons), and [`EnsResolver`](core::deps::EnsResolver).
 //! Token metadata + prices are an opt-in `pricing` feature.
 //!
+//! [`AccountManager`](adapters::AccountManager) adds HD key management: BIP-39 seed
+//! generation/restore, multi-account BIP-44/Ledger-Live derivation, watch-only account
+//! xpubs, counterfactual [`predict_address`](core::accounts::predict_address), gap-limit
+//! account discovery (one batched round-trip per window), and encrypted keystore export.
+//!
 //! [alloy]: https://github.com/alloy-rs
 
 pub mod adapters;

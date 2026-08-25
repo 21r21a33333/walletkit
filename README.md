@@ -52,7 +52,36 @@ println!("ETH {} · USDC {:?}", overview.native, overview.tokens[0].balance);
 Reads and ENS are **standalone** (built from a `Transport`, targeting any address);
 `Wallet::dry_run` is the one wallet-bound convenience.
 
+## Accounts (HD keys, discovery, prediction)
+
+`AccountManager` is the seed-owning HD factory. It generates or restores a BIP-39 mnemonic
+(fail-closed OS CSPRNG, zeroized in memory, redacted from logs) and derives accounts under
+it. Derived signers plug straight into `Wallet::builder` — no facade change.
+
+- **Derivation** — `account(index)` / `account_at_path(path)` and `signer(index)` under a
+  selectable `PathScheme` (`Bip44Standard` `m/44'/60'/0'/0/{i}` vs Ledger Live
+  `m/44'/60'/{i}'/0/0`), with an optional BIP-39 passphrase.
+- **Watch-only** — `account_xpub(account)` hands out an account-level xpub; `derive_address`
+  derives receive addresses from it **without the seed**.
+- **`predict_address`** — counterfactual CREATE2 smart-account address + ERC-4337/6492 deploy
+  data (`predict_address_checked` also reports whether it's deployed); `safe_salt` helper.
+- **Discovery** — `discover(&[rpc], opts)` scans the seed with a BIP-44 gap limit, probing
+  each window in **one JSON-RPC batch per chain** (`Rpc::account_activity`) and unioning
+  "used" across chains; results flag `partial` / `hit_max_index`.
+- **Backup** — `LocalSigner::export_keystore` writes an encrypted EIP-2335 / Web3 Secret
+  Storage keystore (load it back with `from_keystore`). No raw-mnemonic export.
+
+```rust,ignore
+use walletkit::adapters::AccountManager;
+use walletkit::core::accounts::WordCount;
+
+let manager = AccountManager::generate(WordCount::W24)?; // fresh seed, retained for backup
+let signer = manager.signer(0)?;                          // m/44'/60'/0'/0/0
+let wallet = Wallet::builder(rpc, std::sync::Arc::new(signer), policy).build();
+```
+
 ## Status
 
 Design locked; Phase 1 (EVM Execution Core) implementation in progress — the read /
-preview / ENS / pricing DX seams (sub-project F1) are implemented.
+preview / ENS / pricing DX seams (sub-project F1) and HD account management (F2) are
+implemented.

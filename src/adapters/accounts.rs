@@ -126,6 +126,20 @@ impl AccountManager {
         })
     }
 
+    /// Attach a human-readable label to a derived account index (local metadata only). The
+    /// label surfaces on [`account`](Self::account)/[`discover`](Self::discover) results.
+    pub fn set_label(&mut self, index: u32, name: impl Into<String>) {
+        self.labels.insert(index, name.into());
+    }
+
+    /// The account whose label matches `name`, if any.
+    pub fn account_by_label(&self, name: &str) -> Option<Account> {
+        self.labels
+            .iter()
+            .find(|(_, v)| v.as_str() == name)
+            .and_then(|(&i, _)| self.account(i).ok())
+    }
+
     /// A signer for the account at a full derivation path (key stays inside alloy).
     pub fn signer_at_path(&self, path: &str) -> Result<LocalSigner, AccountError> {
         LocalSigner::from_mnemonic_path(self.phrase.as_str(), path, self.password())
@@ -330,5 +344,14 @@ mod tests {
                 mgr.account(i).unwrap().address
             );
         }
+    }
+
+    #[test]
+    fn labels_surface_on_accounts_and_reverse_lookup() {
+        let mut mgr = AccountManager::from_phrase(MNEMONIC).unwrap();
+        mgr.set_label(2, "savings");
+        assert_eq!(mgr.account(2).unwrap().label.as_deref(), Some("savings"));
+        assert_eq!(mgr.account_by_label("savings").unwrap().index, 2);
+        assert!(mgr.account_by_label("missing").is_none());
     }
 }
