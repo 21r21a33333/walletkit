@@ -8,7 +8,7 @@
 use crate::core::deps::{
     AccountActivity, Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError,
     PolicyEngine, PolicyEngineError, Rpc, RpcError, Signer, SignerError, Simulated, StateStore,
-    StateStoreError, SubmissionError, SubmissionStrategy, Versioned,
+    StateStoreError, SubmissionError, SubmissionOpts, SubmissionStrategy, Versioned,
 };
 use crate::core::wallet::{
     AccountExecutor, Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope,
@@ -672,7 +672,7 @@ pub(crate) struct MockSubmit {
 
 #[async_trait]
 impl SubmissionStrategy for MockSubmit {
-    async fn submit(&self, rlp: Bytes) -> Result<TxHash, SubmissionError> {
+    async fn submit(&self, rlp: Bytes, _opts: &SubmissionOpts) -> Result<TxHash, SubmissionError> {
         note(&self.log, "submit");
         self.seen.lock().push(rlp);
         match self.outcome {

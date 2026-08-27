@@ -129,7 +129,7 @@ Two internal paths (the relays are not uniform):
 
 Generic Protect reuses the existing `Transport` pointed at the relay URL, so eRPC failover/retry/timeouts come for free.
 
-**Reuse posture (house rule — don't hand-roll):** `alloy-mev` (leruaa/alloy-mev) for the Flashbots private-tx transport; `mev-share-rs` (paradigmxyz) `FlashbotsSignerLayer` for the auth header. We do not re-implement the signature scheme. **Plan-time gate:** verify both are compatible with pinned `alloy 2.4.1`; if they lag, the fallback is a thin hand-rolled `FlashbotsSignerLayer` over our `Transport` — only if reuse genuinely does not fit.
+**Reuse posture — resolved to a thin in-repo auth (see §10.1).** The reuse candidates (`alloy-mev`, `mev-share`) are a major alloy version behind our pinned `alloy 2.4.1` and cannot be git-pinned (crates.io publish forbids git deps), so reuse genuinely does not fit. We hand-roll only the small, stable `X-Flashbots-Signature` header (sign `keccak256(body)` with the identity key → `address:signature`) and call `eth_sendPrivateTransaction` over the existing `Transport`. No new deps.
 
 **Confirmation is unchanged — H pays off here.** A privately-included tx still lands on-chain, so the executor's chain-based confirm loop settles it with no mempool visibility. The hash-anchoring correctness H proved (no false `Confirmed` under reorg/lying reads) is route-agnostic.
 
@@ -215,7 +215,7 @@ Relays are stubbed in-memory (no live endpoints); anvil backs confirm-parity. Ea
 
 ## 10. Open risks / plan-time gates
 
-1. **Reuse compatibility (first task).** `alloy-mev` / `mev-share-rs` vs pinned `alloy 2.4.1`. If incompatible, fall back to a thin in-repo `FlashbotsSignerLayer`. Resolve before any adapter code.
+1. **Reuse compatibility — RESOLVED (spike, 2026-08-28): thin in-repo fallback.** `alloy-mev` newest is `1.0.0` (Sept 2025) depending on `alloy ^1.0.30` — a *major version behind* our pinned `alloy 2.4.1`; it would fork the alloy tree. `mev-share` `0.1.4` is ethers-era (2023). No alloy-2.x-compatible release exists, and a git dep is disqualifying because `walletkit-rs` publishes to crates.io (no git deps allowed). Verdict: hand-roll the `X-Flashbots-Signature` header (sign `keccak256(body)` with the identity key → `address:signature`) and call `eth_sendPrivateTransaction` over the existing `Transport`. The scheme is tiny and stable; reuse genuinely does not fit, so the house-rule fallback applies. No `alloy-mev`/`mev-share` deps are added.
 2. **`serde` round-trip of `SubmissionOpts`** across all three `StateStore` backends (memory/redb/postgres) — covered by the no-leak-on-recovery test, which exercises real persistence.
 3. **Generic-Protect knob rejection** is validated at `send_with`, *before* the persist-before-broadcast write — a clear `WalletKitError` when a generic relay carries Flashbots-only knobs, never a silent submit-time drop. (Pub fields keep the `DiscoveryOpts` idiom; validation lives at the send boundary, not in a builder.)
 

@@ -4,7 +4,7 @@
 
 **Architecture:** Evolve the `SubmissionStrategy` port to take `&SubmissionOpts`. Add a `PrivateMev` adapter (Flashbots-native via `alloy-mev`/`mev-share-rs`; generic Protect RPC over the existing `Transport`) and a `Router` combinator that dispatches per-tx on `opts.route`. Persist `SubmissionOpts` on `TxHandle` so bumps and crash-recovery re-broadcast on the original route. `Escalation` drives the bump loop off the existing `broadcasts.len()` counter. Two new `SubmissionError` variants make relay failures un-mistakable for "sent".
 
-**Tech Stack:** Rust edition 2024; `alloy 2.4.1` (pinned); `alloy-mev` + `mev-share-rs` (new deps, verified by the Phase 1 spike); `async-trait`; `serde`. Tests reuse the H fault-harness pattern (`tests/support/`) + anvil.
+**Tech Stack:** Rust edition 2024; `alloy 2.4.1` (pinned); `async-trait`; `serde`; `serde_json` (in-tree). **No `alloy-mev`/`mev-share` deps** — the Phase 1 spike found them a major alloy version behind and un-git-pinnable (crates.io publish); the tiny `X-Flashbots-Signature` auth is hand-rolled over the existing `Transport` (design §10.1). Tests reuse the H fault-harness pattern (`tests/support/`) + anvil.
 
 **Structure:** Three linear phases, each a self-contained reviewable component. Fewer checkpoints by design — the reuse spike folds into Phase 1 (verdict reported, not a separate stop). Order is a hard dependency chain: 1 (seam) → 2 (private route over the seam) → 3 (proof + docs).
 
@@ -38,11 +38,11 @@ Cargo.toml                         # (edit) alloy-mev, mev-share-rs
 
 **Component:** the whole per-tx routing seam, internal only. Public-mempool path stays byte-identical; nothing private works yet, but every downstream piece has something to plug into. Ends in one review.
 
-**Reuse:** `alloy-mev` / `mev-share-rs` (spike verdict); `serde` derives; `alloy::Url`.
+**Reuse:** `serde` derives; `alloy::Url`. (Flashbots-crate reuse ruled out by the spike — §10.1.)
 
-**Files:** `Cargo.toml`, `src/core/deps/submission.rs`, `src/adapters/public_mempool.rs`, `src/adapters/router.rs` (new), `src/adapters/mod.rs`, all existing `submit(rlp)` call-sites + mocks.
+**Files:** `src/core/deps/submission.rs`, `src/adapters/public_mempool.rs`, `src/adapters/router.rs` (new), `src/adapters/mod.rs`, all existing `submit(rlp)` call-sites + mocks.
 
-- [ ] **Step 1 — reuse spike (inline decision, no separate stop):** Add `alloy-mev` + `mev-share-rs`; confirm they build against pinned `alloy 2.4.1` (tower/transport versions align) and compile a minimal `FlashbotsSignerLayer` + `eth_sendPrivateTransaction` probe (no send). Record the verdict in design §10.1: **reuse** or **thin in-repo fallback** (hand-rolled `FlashbotsSignerLayer` over our `Transport`). Carry the verdict into Phase 2 Step 1.
+- [x] **Step 1 — reuse spike (DONE 2026-08-28):** Verdict = **thin in-repo fallback**. `alloy-mev 1.0.0` needs `alloy ^1.0.30` (major behind our `2.4.1`); `mev-share 0.1.4` is ethers-era; git-pin disqualified by crates.io publish. Hand-roll the `X-Flashbots-Signature` header + `eth_sendPrivateTransaction` over the existing `Transport` in Phase 2. No new deps.
 - [ ] **Step 2 — types (design §4):** Add `SubmissionOpts`, `SubmissionRoute` (`#[default] Public`), `PrivateRoute` (pub fields, `DiscoveryOpts` idiom), `Relay` (`#[non_exhaustive]`), `Escalation`, `Hints` to `submission.rs`. Add a pure `PrivateRoute::validate() -> Result<(), _>` rejecting Flashbots-only knobs (`block_window`/`fast`/`hints`) on a generic relay (called later at `send_with`).
 - [ ] **Step 3 — port param:** Add `opts: &SubmissionOpts` to `SubmissionStrategy::submit`.
 - [ ] **Step 4 — `PublicMempool`:** accept `&SubmissionOpts`; a `Private` route reaching it is an internal invariant break (`debug_assert`, treat as public). Keep the existing `debug!` broadcast log.
@@ -55,11 +55,11 @@ Cargo.toml                         # (edit) alloy-mev, mev-share-rs
 
 **Component:** a private tx can be sent, persisted, bumped, escalated, and recovered on its original route. This is the feature. Ends in one review.
 
-**Reuse:** Phase 1 spike verdict for the Flashbots path; the existing `Transport` for generic Protect; the existing `broadcasts.len()` bump counter; the existing nonce-release-on-submit-failure path.
+**Reuse:** the existing `Transport`/`Rpc` for both the Flashbots JSON-RPC call and generic Protect; `alloy-signer` for the `X-Flashbots-Signature`; the existing `broadcasts.len()` bump counter; the existing nonce-release-on-submit-failure path.
 
 **Files:** `src/adapters/private_mev.rs` (new), `src/adapters/mod.rs`, `src/core/wallet/primitives/handle.rs`, `src/core/wallet/executor/mod.rs`, `src/facade.rs`, `src/core/wallet/transaction_manager.rs`, `Cargo.toml`.
 
-- [ ] **Step 1 — `PrivateMev` adapter (design §5):** Flashbots-native path — `eth_sendPrivateTransaction` with `maxBlockNumber = current + block_window`, `fast`, MEV-Share `hints`, authed by the identity signer (per spike verdict). Generic Protect path — `HashMap<Relay, Arc<dyn Rpc>>` (a `Transport` per relay URL), `submit` = `send_raw`; `MevBlocker`/`Bloxroute` URLs as constants, `Custom(Url)` passthrough.
+- [ ] **Step 1 — `PrivateMev` adapter (design §5):** Flashbots-native path — build the `eth_sendPrivateTransaction` JSON-RPC body (`maxBlockNumber = current + block_window`, `fast`, MEV-Share `hints`), sign `keccak256(body)` with the identity signer, set `X-Flashbots-Signature: address:sig`, POST via the existing `Transport`. Generic Protect path — `HashMap<Relay, Arc<dyn Rpc>>` (a `Transport` per relay URL), `submit` = `send_raw`; `MevBlocker`/`Bloxroute` URLs as constants, `Custom(Url)` passthrough.
 - [ ] **Step 2 — error taxonomy (design §7):** add `SubmissionError::RelayAuth`/`RelayRejected`; map 401/403/identity → `RelayAuth`, relay-decline → `RelayRejected`, transient network → `Rpc`. `is_already_accepted()` returns `false` for both; add `is_relay_terminal()`. Map into `WalletKitError` + classify in `kind()`. `debug!` records `relay` + route (never the RLP).
 - [ ] **Step 3 — persist on `TxHandle` (design §6):** add `#[serde(default)] pub submission: SubmissionOpts` (doc: privacy-safety invariant; absent ⇒ Public). Thread the caller's opts through the send path into the handle before the persist-before-broadcast write.
 - [ ] **Step 4 — executor integration (design §6):** both submit call-sites (send-bump ~L350, recover ~L157) → `self.submission.submit(rlp, &handle.submission)`. Add the escalation branch in `bump()`: `PublicAfter { cycles }` and `broadcasts.len() >= cycles` → rewrite `handle.submission.route = Public`, WARN, broadcast public (persist the rewrite); else re-send on the persisted route (`StayPrivate` recomputes a fresh `block_window`). A `RelayAuth`/`RelayRejected` return does **not** advance `broadcasts`/`last_broadcast_at` and releases the nonce.

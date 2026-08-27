@@ -11,6 +11,7 @@ pub mod policy;
 pub mod pricing;
 pub mod public_mempool;
 pub mod read;
+pub mod router;
 pub mod signers;
 pub mod store;
 pub mod transport;
@@ -27,6 +28,7 @@ pub use nonce::LocalNonceManager;
 pub use pricing::{ChainlinkPrice, FeedConfig, TokenListSource};
 pub use public_mempool::PublicMempool;
 pub use read::RpcReadClient;
+pub use router::Router;
 pub use signers::LocalSigner;
 pub use store::InMemoryStateStore;
 #[cfg(feature = "postgres")]

@@ -14,7 +14,7 @@ use super::{TransactionManager, signing};
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
-    SubmissionError, SubmissionStrategy,
+    SubmissionError, SubmissionOpts, SubmissionStrategy,
 };
 use crate::core::wallet::{Decision, HandleId, PolicyApproval, SigningRequest, TxHandle, TxStatus};
 use crate::obs::{debug, info, warn};
@@ -154,7 +154,10 @@ impl AccountExecutor {
     pub async fn recover(&self) -> Result<(), ExecutorError> {
         for handle in self.state_store.pending_handles(self.account).await? {
             if matches!(handle.status, TxStatus::Pending | TxStatus::Sent) {
-                let _ = self.submission.submit(handle.signed.clone()).await;
+                let _ = self
+                    .submission
+                    .submit(handle.signed.clone(), &SubmissionOpts::default())
+                    .await;
             }
         }
         Ok(())
@@ -347,7 +350,11 @@ impl AccountExecutor {
         let tx = signing::build_tx(&handle.intent, handle.nonce, current.gas_limit, bumped);
         let signed =
             signing::sign_encode(&*self.signer, tx, handle.intent_hash, &approval, now).await?;
-        match self.submission.submit(signed.rlp.clone()).await {
+        match self
+            .submission
+            .submit(signed.rlp.clone(), &SubmissionOpts::default())
+            .await
+        {
             Ok(_) => {}
             // Already in the mempool (a prior round's replacement): record it, not an error.
             Err(e) if e.is_already_accepted() => {}

@@ -7,7 +7,7 @@ use super::signing;
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
-    SubmissionError, SubmissionStrategy,
+    SubmissionError, SubmissionOpts, SubmissionStrategy,
 };
 use crate::core::wallet::{
     Decision, HandleId, IntentHash, PolicyApproval, PolicyRejection, SignatureEnvelope,
@@ -280,7 +280,11 @@ impl TransactionManager {
             let tx = signing::build_tx(intent, target.nonce, CANCEL_GAS_LIMIT, fees);
             let signed =
                 signing::sign_encode(&*self.signer, tx, intent_hash, approval, now).await?;
-            match self.submission.submit(signed.rlp.clone()).await {
+            match self
+                .submission
+                .submit(signed.rlp.clone(), &SubmissionOpts::default())
+                .await
+            {
                 Ok(_) => return Ok(signed),
                 Err(e) if e.is_already_accepted() => return Ok(signed),
                 Err(e) if e.is_underpriced() && attempts == 0 => {
@@ -344,7 +348,11 @@ impl TransactionManager {
             return Err(e.into());
         }
 
-        match self.submission.submit(signed.rlp).await {
+        match self
+            .submission
+            .submit(signed.rlp, &SubmissionOpts::default())
+            .await
+        {
             Ok(_) => {}
             // Transient (may be in flight) or already-accepted ("already known"/"nonce
             // too low" -> already sent/mined): assume sent — keep the nonce reserved
