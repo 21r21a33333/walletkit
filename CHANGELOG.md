@@ -6,6 +6,10 @@ All notable changes to walletkit are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-27
+
+First release. The complete Phase-1 EVM execution core.
+
 ### Added
 - **EVM execution core** (#1): `TxIntent` → policy → nonce → gas → signer →
   submission → state, wired through the `Wallet` facade. Functional-core/imperative-shell
@@ -67,4 +71,5 @@ All notable changes to walletkit are documented here. The format follows
 - Five rustdoc warnings: intra-doc links to private modules (`wasm`, `build`, `primitives`,
   cfg-gated `redb`/`postgres`) demoted to code spans, and `pending_handles` linked via `Self::`.
 
-[Unreleased]: https://github.com/21r21a33333/walletkit/commits/main
+[Unreleased]: https://github.com/21r21a33333/walletkit/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/21r21a33333/walletkit/releases/tag/v0.1.0

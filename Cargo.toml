@@ -3,7 +3,7 @@
 # writes `use walletkit::…` regardless of the package name.
 [package]
 name = "walletkit-rs"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 # Inherited from alloy's rolling MSRV (2.4.1 needs 1.94.1); wasmtime's `policy-moonpay`
 # floor (1.86) is lower, so alloy sets the crate-wide minimum. CI pins this exact value.
@@ -20,7 +20,6 @@ categories = [
     "network-programming",
     "asynchronous",
 ]
-publish = false
 
 [lib]
 name = "walletkit"
