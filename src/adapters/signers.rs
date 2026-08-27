@@ -20,6 +20,8 @@ use rand::rngs::OsRng;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+/// The in-process [`Signer`]: holds a secp256k1 key locally
+/// (from hex, keystore, or mnemonic) and never exports it.
 pub struct LocalSigner {
     inner: PrivateKeySigner, // holds the key; no export
 }

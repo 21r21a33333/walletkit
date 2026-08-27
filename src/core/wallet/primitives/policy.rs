@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// re-evaluated. Absolute wei caps — a policy decision independent of live fees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GasEnvelope {
+    /// Absolute cap on `max_fee_per_gas` (wei) any bump may reach.
     pub max_fee_cap: u128,
+    /// Absolute cap on `max_priority_fee_per_gas` (wei) any bump may reach.
     pub max_priority_cap: u128,
 }
 
@@ -18,6 +20,7 @@ impl GasEnvelope {
         max_priority_cap: 50_000_000_000,
     };
 
+    /// Whether both fees sit within their caps — the check a bump passes to reuse the approval.
     pub fn admits(&self, max_fee: u128, max_priority: u128) -> bool {
         max_fee <= self.max_fee_cap && max_priority <= self.max_priority_cap
     }
@@ -46,14 +49,17 @@ impl PolicyApproval {
         }
     }
 
+    /// Whether this approval covers `payload_hash` — the bind check the signer enforces.
     pub fn authorizes(&self, payload_hash: B256) -> bool {
         self.payload_hash == payload_hash
     }
 
+    /// The fee ceiling within which a bump may reuse this approval without re-policy.
     pub fn gas_envelope(&self) -> GasEnvelope {
         self.gas_envelope
     }
 
+    /// Unix seconds after which the approval expires and policy must run again.
     pub fn valid_until(&self) -> u64 {
         self.valid_until
     }
@@ -63,8 +69,11 @@ impl PolicyApproval {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("policy denied by rule `{rule}`{}: {reason}", .field.as_ref().map(|f| format!(" (field `{f}`)")).unwrap_or_default())]
 pub struct PolicyRejection {
+    /// Identifier of the rule that denied (e.g. `"allowlist"`, `"spend-limit"`).
     pub rule: String,
+    /// The offending field, when the rule pins one (e.g. `"to"`).
     pub field: Option<String>,
+    /// Human-readable explanation of the denial.
     pub reason: String,
 }
 
@@ -74,7 +83,9 @@ pub struct PolicyRejection {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Decision {
+    /// Allowed — carries the unforgeable approval the signer requires.
     Allow(PolicyApproval),
+    /// Denied — carries the reason.
     Deny(PolicyRejection),
 }
 
@@ -87,7 +98,9 @@ pub enum Decision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PolicyOutcome {
+    /// The intent would pass policy (no capability is minted for a dry-run).
     WouldAllow,
+    /// The intent would be denied, with the same reason a real decision carries.
     WouldDeny(PolicyRejection),
 }
 

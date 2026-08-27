@@ -28,6 +28,8 @@ const TX_PENDING: TableDefinition<(&str, &[u8]), ()> = TableDefinition::new("tx_
 const ID_LO: [u8; 32] = [0u8; 32];
 const ID_HI: [u8; 32] = [0xffu8; 32];
 
+/// The embedded durable [`StateStore`], backed by redb
+/// (pure-Rust ACID key-value). The default persistent backend.
 pub struct RedbStateStore {
     db: Arc<Database>,
 }

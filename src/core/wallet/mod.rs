@@ -1,4 +1,4 @@
-//! Wallet domain types. All primitives live under [`primitives`]; this module is
+//! Wallet domain types. All primitives live under `primitives`; this module is
 //! a thin re-export surface.
 
 mod executor;

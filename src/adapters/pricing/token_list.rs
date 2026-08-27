@@ -9,6 +9,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The [`TokenMetadataSource`] backed by a parsed
+/// Uniswap-schema token list, with an optional on-chain fallback for omitted tokens.
 pub struct TokenListSource {
     tokens: HashMap<(u64, Address), Erc20Metadata>,
     fallback: Option<Arc<dyn ReadClient>>,

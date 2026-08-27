@@ -1,3 +1,7 @@
+//! The native, zero-dependency policy engine: composable in-process [`Policy`] rules folded
+//! deny-over-allow under default-deny, plus the built-in rules ([`TargetAllowlist`],
+//! [`SpendLimit`], …) and the dev-only [`AllowAll`].
+
 use crate::core::deps::{Clock, PolicyEngine, PolicyEngineError};
 use crate::core::wallet::{
     Decision, GasEnvelope, PolicyApproval, PolicyOutcome, PolicyRejection, SigningRequest,
@@ -14,8 +18,11 @@ const DEFAULT_APPROVAL_TTL: u64 = 300;
 /// only speaks up (`Deny`) when tripped and never grants `Allow`.
 #[derive(Debug)]
 pub enum Verdict {
+    /// The rule grants permission.
     Allow,
+    /// The rule denies, with a reason (short-circuits the fold — deny-over-allow).
     Deny(PolicyRejection),
+    /// The rule has no opinion; it neither grants nor denies.
     Abstain,
 }
 
@@ -23,6 +30,7 @@ pub enum Verdict {
 /// rule; richer/declarative policy comes from the Regorus or WASM engines, not new
 /// hand-written predicates here.
 pub trait Policy: Send + Sync {
+    /// Return this rule's verdict on `request`.
     fn check(&self, request: &SigningRequest) -> Verdict;
 }
 
@@ -34,6 +42,7 @@ pub struct TargetAllowlist {
 }
 
 impl TargetAllowlist {
+    /// Allow calls to any of `allowed`.
     pub fn new(allowed: impl IntoIterator<Item = Address>) -> Self {
         Self {
             allowed: allowed.into_iter().collect(),
@@ -60,6 +69,7 @@ pub struct SpendLimit {
 }
 
 impl SpendLimit {
+    /// Deny any intent whose value exceeds `max_value` wei.
     pub fn new(max_value: U256) -> Self {
         Self { max_value }
     }
@@ -101,6 +111,7 @@ pub struct TypedDataDomainAllowlist {
 }
 
 impl TypedDataDomainAllowlist {
+    /// Allow EIP-712 signing only for these `verifyingContract` addresses.
     pub fn new(allowed: impl IntoIterator<Item = Address>) -> Self {
         Self {
             allowed: allowed.into_iter().collect(),
@@ -145,6 +156,7 @@ pub struct DefaultPolicyEngine {
 }
 
 impl DefaultPolicyEngine {
+    /// Compose `policies` under deny-over-allow / default-deny, using `clock` for approval TTLs.
     pub fn new(policies: Vec<Box<dyn Policy>>, clock: Arc<dyn Clock>) -> Self {
         Self {
             policies,

@@ -11,10 +11,12 @@ use alloy_primitives::{Address, B256, Bytes, Signature, eip191_hash_message};
 /// calls) can slot in without breaking existing engines.
 #[non_exhaustive]
 pub enum SigningRequest {
+    /// A transaction intent to sign and broadcast.
     Transaction(TxIntent),
     /// A human-readable message; the EIP-191 `0x19` prefix is applied at hash time, so a
     /// signed message can never be a valid tx preimage (blind-signing guard, §5.2).
     Message(Bytes),
+    /// EIP-712 typed structured data; the domain is validated before hashing.
     TypedData(Box<TypedData>),
     /// A cancel — a 0-value self-send at a stuck nonce. Carries the intent so the gate can
     /// verify it is genuinely a self-send before default-allowing it.
@@ -56,6 +58,7 @@ pub fn enforce_low_s(sig: Signature) -> Signature {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SigningScheme {
+    /// secp256k1 ECDSA — Ethereum's `ecrecover` scheme; the only one today.
     Secp256k1Ecdsa,
 }
 
@@ -77,14 +80,17 @@ impl SignatureEnvelope {
         }
     }
 
+    /// The curve/scheme that produced the signature.
     pub fn scheme(&self) -> SigningScheme {
         self.scheme
     }
 
+    /// The address whose key signed.
     pub fn signer(&self) -> Address {
         self.signer
     }
 
+    /// The signature itself.
     pub fn signature(&self) -> Signature {
         self.signature
     }
@@ -100,8 +106,10 @@ impl SignatureEnvelope {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SigningError {
+    /// The EIP-712 domain pins no chain (absent or zero `chainId`) — a replay vector.
     #[error("EIP-712 domain has no (or zero) chainId — refusing to sign a chain-agnostic payload")]
     ZeroChainDomain,
+    /// The typed data could not be EIP-712 encoded.
     #[error("typed data could not be EIP-712 encoded: {0}")]
     Encode(String),
 }

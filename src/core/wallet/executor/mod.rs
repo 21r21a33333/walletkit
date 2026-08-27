@@ -71,6 +71,7 @@ pub struct AccountExecutor {
 }
 
 impl AccountExecutor {
+    /// Wire an executor for one `account` from the ports it drives.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         rpc: Arc<dyn Rpc>,
@@ -403,18 +404,25 @@ impl AccountExecutor {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ExecutorError {
+    /// An RPC call failed.
     #[error(transparent)]
     Rpc(#[from] RpcError),
+    /// Fee estimation/bumping failed.
     #[error(transparent)]
     Gas(#[from] GasOracleError),
+    /// Policy evaluation failed operationally (fail-closed).
     #[error(transparent)]
     Policy(#[from] PolicyEngineError),
+    /// Nonce allocation/reconciliation failed.
     #[error(transparent)]
     Nonce(#[from] NonceManagerError),
+    /// Signing failed.
     #[error(transparent)]
     Signer(#[from] SignerError),
+    /// A durable-store operation failed.
     #[error(transparent)]
     Store(#[from] StateStoreError),
+    /// Broadcasting the transaction failed.
     #[error(transparent)]
     Submission(#[from] SubmissionError),
 }

@@ -17,6 +17,7 @@ pub struct TxPreview {
     /// `eth_estimateGas` — advisory (a dry-run is a lower bound); `None` when the tx would
     /// revert (there is no meaningful estimate).
     pub gas_estimate: Option<u64>,
+    /// Whether the simulated call succeeded or reverted (with the decoded reason).
     pub outcome: SimOutcome,
     /// EIP-2930 access list — the addresses/slots the call touches; `None` when the node
     /// doesn't support `eth_createAccessList` or it failed.
@@ -25,10 +26,13 @@ pub struct TxPreview {
     pub return_data: Bytes,
 }
 
+/// Whether a simulated call would succeed or revert.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SimOutcome {
+    /// The call would succeed.
     Success,
+    /// The call would revert, with the decoded reason.
     Revert(RevertReason),
 }
 
@@ -42,7 +46,12 @@ pub enum RevertReason {
     /// `Panic(uint256)` — selector `0x4e487b71`; carries the panic code.
     Panic(u64),
     /// A contract's custom error: 4-byte selector + ABI-encoded tail.
-    Custom { selector: [u8; 4], data: Bytes },
+    Custom {
+        /// The 4-byte error selector.
+        selector: [u8; 4],
+        /// The ABI-encoded error arguments.
+        data: Bytes,
+    },
     /// Empty or non-decodable revert data.
     Unknown(Bytes),
 }

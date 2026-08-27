@@ -98,11 +98,17 @@ pub async fn refresh_public_endpoints() -> Result<usize, RpcError> {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Vendor {
+    /// Alchemy.
     Alchemy,
+    /// Infura.
     Infura,
+    /// dRPC.
     Drpc,
+    /// Ankr.
     Ankr,
+    /// Tenderly.
     Tenderly,
+    /// thirdweb (chain-id-based; covers any chain).
     Thirdweb,
 }
 

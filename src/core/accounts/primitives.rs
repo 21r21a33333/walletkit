@@ -40,10 +40,15 @@ impl PathScheme {
 /// BIP-39 entropy strength, expressed in mnemonic words (128–256 bits of entropy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordCount {
+    /// 12 words (128 bits of entropy).
     W12,
+    /// 15 words (160 bits).
     W15,
+    /// 18 words (192 bits).
     W18,
+    /// 21 words (224 bits).
     W21,
+    /// 24 words (256 bits).
     W24,
 }
 
@@ -65,9 +70,13 @@ impl WordCount {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
+    /// The derivation index this account sits at.
     pub index: u32,
+    /// The full BIP-32 path it was derived from.
     pub path: String,
+    /// The account's address.
     pub address: Address,
+    /// An optional caller-assigned label.
     pub label: Option<String>,
 }
 
@@ -99,7 +108,9 @@ pub fn derive_address(xpub: &AccountXpub, index: u32) -> Result<Address, Account
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployData {
+    /// The ERC-4337 v0.7 factory address.
     pub factory: Address,
+    /// The v0.7 `factoryData` calldata (the `initCode` tail after the factory).
     pub factory_data: Bytes,
 }
 
@@ -120,7 +131,9 @@ impl DeployData {
 pub struct PredictedAccount {
     /// The CREATE2 address — valid whether or not code exists there yet.
     pub address: Address,
+    /// The (post-scheme) CREATE2 salt used.
     pub salt: B256,
+    /// Deploy data to thread into a later ERC-4337 deploy / EIP-6492 wrapper, if supplied.
     pub deploy: Option<DeployData>,
     /// `None` = not checked (pure computation); `Some` only from `predict_address_checked`.
     pub is_deployed: Option<bool>,
@@ -132,9 +145,13 @@ pub struct PredictedAccount {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PredictParams {
+    /// The CREATE2 deployer (factory) address.
     pub factory: Address,
+    /// The final CREATE2 salt (after any scheme like [`safe_salt`] is applied).
     pub salt: B256,
+    /// `keccak256` of the account's init code.
     pub init_code_hash: B256,
+    /// Optional deploy data to carry into the resulting [`PredictedAccount`].
     pub deploy: Option<DeployData>,
 }
 
@@ -176,7 +193,9 @@ pub fn safe_salt(initializer: &[u8], salt_nonce: U256) -> B256 {
 /// batched [`account_activity`](crate::core::deps::Rpc::account_activity) call per window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsedPredicate {
+    /// "Used" means outbound activity only (nonce > 0).
     NonceOnly,
+    /// "Used" means nonce > 0 **or** a non-zero native balance (catches receive-only addresses).
     NonceOrBalance,
 }
 
@@ -189,6 +208,7 @@ pub struct DiscoveryOpts {
     pub gap_limit: usize,
     /// Hard scan bound; hitting it marks the result partial.
     pub max_index: usize,
+    /// What counts an index as "used".
     pub used: UsedPredicate,
     /// First index to probe (for resuming a scan).
     pub start_index: usize,
@@ -226,13 +246,16 @@ pub struct DiscoveredAccounts {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AccountError {
+    /// A derivation path was malformed (e.g. a custom template missing `{index}`).
     #[error("invalid derivation path: {0}")]
     InvalidPath(String),
     /// A phrase failed BIP-39 validation (checksum/word count). Never carries the phrase.
     #[error("invalid mnemonic phrase")]
     InvalidPhrase,
+    /// BIP-32 key derivation failed.
     #[error("key derivation failed: {0}")]
     Derivation(String),
+    /// The OS secure RNG was unavailable when generating entropy (fail-closed).
     #[error("secure RNG unavailable: {0}")]
     Rng(String),
     /// A read failed during an on-chain check (e.g. `predict_address_checked`).

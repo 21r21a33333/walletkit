@@ -33,6 +33,8 @@ alloy_sol_types::sol! {
     }
 }
 
+/// The [`ReadClient`] over an alloy provider, with
+/// Multicall3-batched balance reads.
 pub struct RpcReadClient {
     provider: DynProvider,
 }

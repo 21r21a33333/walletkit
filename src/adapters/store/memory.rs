@@ -1,6 +1,6 @@
 //! In-memory `StateStore`: a versioned map of `scope -> nonce state` plus persisted
 //! handles. Non-durable, so recovery is single-run — the durable backends are
-//! [`redb`](super::redb) and [`postgres`](super::postgres).
+//! the feature-gated `redb` and `postgres` stores.
 
 use crate::core::deps::{StateStore, StateStoreError, Versioned};
 use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};
@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
+/// The non-durable [`StateStore`]: keeps nonce state and
+/// handles in memory. Recovery is single-run only; use redb/Postgres to survive a restart.
 #[derive(Default)]
 pub struct InMemoryStateStore {
     nonces: Mutex<HashMap<NonceScope, (Versioned<NonceState>, FenceToken)>>,

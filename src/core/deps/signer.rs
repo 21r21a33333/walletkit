@@ -1,3 +1,5 @@
+//! [`Signer`] — the account signing port (policy-gated, no key export).
+
 use crate::core::wallet::{IntentHash, PolicyApproval, SignatureEnvelope, SigningError};
 use alloy_consensus::TxEip1559;
 use alloy_dyn_abi::TypedData;
@@ -10,8 +12,11 @@ use async_trait::async_trait;
 /// within the envelope can reuse it (§5.1).
 #[async_trait]
 pub trait Signer: Send + Sync {
+    /// The address this signer produces signatures for.
     fn address(&self) -> Address;
 
+    /// Sign an EIP-1559 transaction, gated by `approval` (bound to `intent_hash`, unexpired
+    /// at `now`, fees within the envelope).
     async fn sign_transaction(
         &self,
         tx: &TxEip1559,
@@ -37,6 +42,7 @@ pub trait Signer: Send + Sync {
     ) -> Result<SignatureEnvelope, SignerError>;
 }
 
+/// Why signing failed — a gate trip, a malformed payload, or a backend error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SignerError {

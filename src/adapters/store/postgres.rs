@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS tx_handles (
 CREATE INDEX IF NOT EXISTS tx_handles_pending ON tx_handles (account) WHERE NOT terminal;
 ";
 
+/// The networked durable [`StateStore`], backed by
+/// Postgres — the shared backend for multi-process deployments.
 pub struct PostgresStateStore {
     pool: PgPool,
 }

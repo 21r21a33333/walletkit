@@ -1,3 +1,5 @@
+//! [`NonceManager`] — the gapless nonce-allocation port.
+
 use crate::core::deps::{RpcError, StateStoreError};
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -6,6 +8,7 @@ use async_trait::async_trait;
 /// released reservations, and reconciles with the chain after a detected gap.
 #[async_trait]
 pub trait NonceManager: Send + Sync {
+    /// Reserve the next nonce for `account` (recycling a freed one if available).
     async fn allocate(&self, account: Address) -> Result<u64, NonceManagerError>;
     /// Recycle a reserved nonce whose transaction will **never mine** (never
     /// broadcast, or dropped from the mempool). Never release a nonce whose tx was
@@ -20,8 +23,10 @@ pub trait NonceManager: Send + Sync {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum NonceManagerError {
+    /// A durable-store read/write failed.
     #[error(transparent)]
     Store(#[from] StateStoreError),
+    /// An RPC call (e.g. chain-nonce reconciliation) failed.
     #[error(transparent)]
     Rpc(#[from] RpcError),
 }

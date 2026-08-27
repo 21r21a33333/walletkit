@@ -102,11 +102,13 @@ impl TransportBuilder {
         self
     }
 
+    /// Append several fallback endpoints at once.
     pub fn fallbacks(mut self, urls: impl IntoIterator<Item = Url>) -> Self {
         self.fallbacks.extend(urls);
         self
     }
 
+    /// Configure request retries: up to `max_attempts` with `backoff_ms` initial backoff.
     pub fn retry(mut self, max_attempts: u32, backoff_ms: u64) -> Self {
         self.retry_max = max_attempts;
         self.retry_backoff_ms = backoff_ms;
@@ -146,6 +148,7 @@ impl TransportBuilder {
         self.header("authorization", &format!("Bearer {token}"))
     }
 
+    /// Finalize the builder into a [`Transport`], wiring the throttle/retry/failover layers.
     pub fn build(self) -> Result<Transport, TransportBuildError> {
         let mut client_builder = Client::builder().default_headers(self.headers);
         if let Some(t) = self.timeout {
@@ -189,11 +192,13 @@ impl TransportBuilder {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransportBuildError {
+    /// The config listed no endpoints to connect to.
     #[error("transport config has no endpoints")]
     NoEndpoints,
     /// No public default / vendor endpoint is known for the chain.
     #[error("no known endpoint for chain {0}")]
     UnknownChain(u64),
+    /// The underlying HTTP client could not be built.
     #[error("http client build failed: {0}")]
     HttpClient(#[from] alloy_transport_http::reqwest::Error),
 }
@@ -203,16 +208,22 @@ pub enum TransportBuildError {
 pub struct TransportConfig {
     /// The first endpoint is primary; the rest are fallbacks.
     pub endpoints: Vec<Url>,
+    /// Max retry attempts per request.
     #[serde(default = "default_retry_max")]
     pub retry_max: u32,
+    /// Initial retry backoff in milliseconds.
     #[serde(default = "default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
+    /// How many endpoints to race in parallel (`1` = pure failover).
     #[serde(default = "default_hedge")]
     pub hedge: usize,
+    /// Optional per-request timeout in milliseconds.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Optional client-side rate limit in requests per second.
     #[serde(default)]
     pub rate_limit_rps: Option<u32>,
+    /// Optional bearer token set as `Authorization: Bearer …` on every request.
     #[serde(default)]
     pub bearer: Option<String>,
 }

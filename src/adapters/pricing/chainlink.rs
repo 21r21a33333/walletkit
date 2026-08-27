@@ -25,7 +25,9 @@ alloy_sol_types::sol! {
 /// A Chainlink feed: its aggregator address and heartbeat (the max seconds between on-chain
 /// updates for this feed on this chain).
 pub struct FeedConfig {
+    /// The Chainlink aggregator contract address.
     pub address: Address,
+    /// The feed's heartbeat: max seconds between on-chain updates before it's considered stale.
     pub heartbeat_secs: u64,
 }
 
@@ -39,6 +41,8 @@ pub struct ChainlinkPrice {
 }
 
 impl ChainlinkPrice {
+    /// Build over a provider and a `(chain_id, token) -> FeedConfig` map; `grace_secs` is the
+    /// staleness tolerance added on top of each feed's heartbeat.
     pub fn new(
         provider: DynProvider,
         clock: Arc<dyn Clock>,

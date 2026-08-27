@@ -219,26 +219,32 @@ pub struct WalletBuilder {
 }
 
 impl WalletBuilder {
+    /// Confirmation depth an outcome must reach before it is treated as terminal.
     pub fn confirmations(mut self, depth: u64) -> Self {
         self.confirmations = Some(depth);
         self
     }
+    /// Seconds a pending tx may sit before the executor bumps its fees (RBF).
     pub fn bump_timeout(mut self, secs: u64) -> Self {
         self.bump_timeout = Some(secs);
         self
     }
+    /// Absolute per-tx max-fee ceiling (wei); bumps stop rather than exceed it.
     pub fn gas_ceiling(mut self, wei: u128) -> Self {
         self.gas_ceiling = wei;
         self
     }
+    /// Percentage padding added to the estimated gas limit.
     pub fn gas_buffer_pct(mut self, pct: u128) -> Self {
         self.gas_buffer_pct = Some(pct);
         self
     }
+    /// Use a durable [`StateStore`] instead of the in-memory default (enables crash recovery).
     pub fn store(mut self, store: Arc<dyn StateStore>) -> Self {
         self.store = Some(store);
         self
     }
+    /// Override the time source (e.g. for deterministic tests).
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
         self

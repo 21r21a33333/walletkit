@@ -1,3 +1,5 @@
+//! [`Rpc`] — the object-safe read/submit port over an alloy `Provider`.
+
 use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_primitives::{Address, B256, Bytes, TxHash, U256};
 use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionRequest};
@@ -7,7 +9,9 @@ use async_trait::async_trait;
 /// transaction count (nonce) and the native balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccountActivity {
+    /// Mined transaction count (the account's on-chain nonce).
     pub nonce: u64,
+    /// Native-token balance in wei.
     pub balance: U256,
 }
 
@@ -23,10 +27,11 @@ pub enum Simulated {
 
 /// Object-safe read/submit facade over an alloy `Provider`: exactly the chain ops
 /// the nonce/gas/submission adapters need. alloy's generic `Provider`/`Filler`
-/// types stay confined inside the concrete adapter (the `Transport` struct, Task
-/// 12) — only concrete data types cross this port.
+/// types stay confined inside the concrete [`Transport`](crate::adapters::Transport)
+/// adapter — only concrete data types cross this port.
 #[async_trait]
 pub trait Rpc: Send + Sync {
+    /// Nonce including this account's pending-pool transactions (`pending` tag).
     async fn pending_nonce(&self, account: Address) -> Result<u64, RpcError>;
     /// Mined tx count for `account` at latest (the next mined nonce) — the executor's
     /// confirmation signal: a handle's nonce below this has been consumed on-chain.
@@ -41,6 +46,7 @@ pub trait Rpc: Send + Sync {
     /// Anchors a receipt: a receipt whose block hash disagrees with this is a
     /// stale/reorged read and must not advance the tx lifecycle.
     async fn block_hash(&self, number: u64) -> Result<Option<B256>, RpcError>;
+    /// EIP-1559 fee estimate (max fee + priority tip) from the node's estimator.
     async fn estimate_fees(&self) -> Result<Eip1559Estimation, RpcError>;
     /// Base fee of the latest block (0 on pre-1559 chains).
     async fn base_fee(&self) -> Result<u128, RpcError>;
@@ -56,7 +62,9 @@ pub trait Rpc: Send + Sync {
         &self,
         request: &TransactionRequest,
     ) -> Result<AccessListResult, RpcError>;
+    /// `eth_sendRawTransaction` — broadcast signed RLP, returning its hash.
     async fn send_raw(&self, rlp: Bytes) -> Result<TxHash, RpcError>;
+    /// Receipt for `tx`, or `None` while it is still pending.
     async fn receipt(&self, tx: TxHash) -> Result<Option<TransactionReceipt>, RpcError>;
     /// `(nonce, native balance)` for many accounts in **one JSON-RPC batch** round-trip —
     /// the account-discovery scan primitive. Results align 1:1 with `accounts`.
@@ -66,11 +74,17 @@ pub trait Rpc: Send + Sync {
     ) -> Result<Vec<AccountActivity>, RpcError>;
 }
 
+/// Why an RPC operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RpcError {
     /// An RPC call failed. `transient` (network/timeout/5xx/rate-limit) → the caller
     /// may retry; otherwise it is a terminal JSON-RPC or method error.
     #[error("rpc call failed: {message}")]
-    Call { message: String, transient: bool },
+    Call {
+        /// The node/transport error message.
+        message: String,
+        /// Whether a retry might succeed (network/timeout/5xx/rate-limit).
+        transient: bool,
+    },
 }

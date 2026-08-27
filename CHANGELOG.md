@@ -43,5 +43,28 @@ All notable changes to walletkit are documented here. The format follows
   on `TxPreview`; runnable `examples/` and a compiled quickstart doctest.
 - **Repository maintenance** (#2): dual MIT/Apache-2.0 license, CI (fmt/clippy/test),
   MSRV pin, contributor/security docs, issue/PR templates.
+- **Supply-chain & release hardening** (#11): `#![forbid(unsafe_code)]` and a
+  `deny(clippy::unwrap_used/expect_used/panic)` no-panic policy (relaxed under `cfg(test)`);
+  broken/private intra-doc links denied crate-wide. New report-only `supply-chain` workflow
+  runs `cargo-deny` (advisories · licenses · bans · sources) on PRs and weekly; CI gains an
+  MSRV job, a `cargo-hack` feature-matrix job, a docs build, and `--locked` throughout.
+  `docs.rs` metadata builds all-feature docs. Publishing prep: crates.io package name
+  `walletkit-rs` with `[lib] name = "walletkit"` (import path unchanged), broader
+  `categories`, and a `documentation` link.
+- **Documentation pass** (#11): every public item is now documented, enforced by a
+  `#![deny(missing_docs)]` gate; the crate root gains a feature-flag table and design
+  pointer. New maintenance gates keep it that way — CI requires a `CHANGELOG.md` entry for
+  any `src/` change (skippable via a `skip-changelog` label), and the documentation
+  conventions are recorded in `CONTRIBUTING.md`.
+
+### Changed
+- **crates.io package name is `walletkit-rs`** (the `walletkit` name is taken); the library
+  name stays `walletkit`, so `use walletkit::…` is unchanged for dependents.
+- **MSRV corrected to 1.94.1** — the previously declared `1.85` never built; alloy 2.4.1's
+  rolling MSRV is the real floor. Now pinned and CI-verified.
+
+### Fixed
+- Five rustdoc warnings: intra-doc links to private modules (`wasm`, `build`, `primitives`,
+  cfg-gated `redb`/`postgres`) demoted to code spans, and `pending_handles` linked via `Self::`.
 
 [Unreleased]: https://github.com/21r21a33333/walletkit/commits/main

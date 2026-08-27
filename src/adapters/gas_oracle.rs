@@ -20,6 +20,7 @@ pub struct RpcGasOracle {
 }
 
 impl RpcGasOracle {
+    /// Build over an RPC, refusing to bump `max_fee_per_gas` past `ceiling_max_fee` (wei).
     pub fn new(rpc: Arc<dyn Rpc>, ceiling_max_fee: u128) -> Self {
         Self {
             rpc,

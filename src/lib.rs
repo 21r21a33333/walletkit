@@ -1,9 +1,21 @@
+// `--cfg docsrs` (set by docs.rs) turns on per-item `doc(cfg(...))` feature badges.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// Doc links must resolve to public items — no dangling or private-item links escape review.
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
+// The no-panic house rule, enforced. Relaxed under `cfg(test)` so unit tests may `unwrap`.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+// Every public item must carry documentation.
+#![deny(missing_docs)]
+
 //! walletkit — a client-side ergonomic facade over [alloy] for wallet
 //! infrastructure and transaction execution.
 //!
-//! Hexagonal layout (mirrors evm-executor): [`core`] holds the domain and the
-//! object-safe ports ([`core::deps`]); [`adapters`] holds concrete
-//! implementations behind those ports.
+//! Hexagonal layout: [`core`] holds the domain and the object-safe ports
+//! ([`core::deps`]); [`adapters`] holds the concrete implementations behind those ports.
+//! You wire adapters into the [`Wallet`] facade and drive everything through it.
 //!
 //! Beyond sending and tracking transactions, it exposes read-only surfaces over the same
 //! resilient transport: [`ReadClient`](core::deps::ReadClient) (balances/metadata/allowances,
@@ -42,6 +54,25 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Feature flags
+//!
+//! | Feature | Default | Enables |
+//! |---|:---:|---|
+//! | `tracing` | ✓ | `tracing` spans/events on key paths (redacted). Off → the shim compiles to no-ops. |
+//! | `redb` | ✓ | The embedded `RedbStateStore` durable backend. |
+//! | `postgres` | | The networked `PostgresStateStore` backend. |
+//! | `pricing` | | The `pricing` seam: token-list metadata + Chainlink prices. |
+//! | `policy-moonpay` | | The MoonPay Open Wallet Standard engine with a sandboxed `wasip1` plugin runner. |
+//!
+//! With `--no-default-features` the crate builds down to the ports plus the
+//! [`InMemoryStateStore`](adapters::InMemoryStateStore) — the minimal dependency surface.
+//!
+//! # Design
+//!
+//! See the [`SPEC.md`](https://github.com/21r21a33333/walletkit/blob/main/SPEC.md) for the
+//! architecture, the phase roadmap, and the cross-cutting invariants (policy→sign binding,
+//! nonce fencing, reorg-aware finality).
 //!
 //! [alloy]: https://github.com/alloy-rs
 

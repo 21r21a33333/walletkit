@@ -15,6 +15,8 @@ use async_trait::async_trait;
 /// EIP-3668 `OffchainLookup(address,string[],bytes,bytes4,bytes)` error selector.
 const OFFCHAIN_LOOKUP: [u8; 4] = [0x55, 0x6f, 0x18, 0x30];
 
+/// The [`EnsResolver`] over a plain alloy provider
+/// (forward-verified reverse lookups; strict RPC, no CCIP-Read gateway hop).
 pub struct RpcEnsResolver {
     provider: DynProvider,
 }

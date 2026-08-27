@@ -1,3 +1,5 @@
+//! [`PolicyEngine`] — the pre-sign authorization port.
+
 use crate::core::wallet::{Decision, PolicyOutcome, SigningRequest};
 use async_trait::async_trait;
 
@@ -9,6 +11,8 @@ use async_trait::async_trait;
 /// approval, so no engine — including third-party plugins — can forge authorization.
 #[async_trait]
 pub trait PolicyEngine: Send + Sync {
+    /// The real gate: allow (minting an approval) or deny `request`. An operational failure
+    /// is `Err` and must be treated fail-closed.
     async fn evaluate(&self, request: &SigningRequest) -> Result<Decision, PolicyEngineError>;
 
     /// Side-effect-free dry-run: **would** this request be allowed, and if not, why? The
