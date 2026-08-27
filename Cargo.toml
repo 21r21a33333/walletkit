@@ -106,6 +106,10 @@ pricing = []
 
 [dev-dependencies]
 alloy-node-bindings = "2.4.1"
+# The fault-injection harness implements the `Rpc` trait (which is `#[async_trait]`) and
+# names `Eip1559Estimation` in its signatures; both are test-only.
+alloy-eips = "2.4.1"
+async-trait = "0.1.92"
 tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
 tempfile = "3"
