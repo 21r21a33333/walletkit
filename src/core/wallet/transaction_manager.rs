@@ -31,6 +31,8 @@ const DEFAULT_GAS_BUFFER_PCT: u128 = 25;
 /// needs no estimation (Yellow Paper G_transaction).
 const CANCEL_GAS_LIMIT: u64 = 21_000;
 
+/// Staged send pipeline: policy → nonce → gas → sign → submit → persist, plus cancel
+/// and bump. Wraps the ports; the [`Wallet`](crate::Wallet) facade drives it.
 pub struct TransactionManager {
     rpc: Arc<dyn Rpc>,
     gas_oracle: Arc<dyn GasOracle>,
@@ -44,6 +46,7 @@ pub struct TransactionManager {
 }
 
 impl TransactionManager {
+    /// Wire the pipeline from its ports (`gas_buffer_pct` pads the estimated gas limit).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         rpc: Arc<dyn Rpc>,
@@ -387,31 +390,52 @@ fn fee_basis(signed: &Bytes) -> Result<Eip1559Estimation, TransactionManagerErro
         .ok_or(TransactionManagerError::CancelTerminal)
 }
 
+/// Why a send/cancel/bump through the pipeline failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransactionManagerError {
+    /// The signer's address does not control the intent's account.
     #[error("signer {signer} does not control the intent account {intent}")]
-    AccountMismatch { intent: Address, signer: Address },
+    AccountMismatch {
+        /// The intent's declared account.
+        intent: Address,
+        /// The signer's actual address.
+        signer: Address,
+    },
+    /// Pre-send simulation rejected the intent (it would revert).
     #[error("simulation rejected: {reason}")]
-    SimulationRejected { reason: String },
+    SimulationRejected {
+        /// The decoded revert/rejection reason.
+        reason: String,
+    },
+    /// No tracked transaction matches the given handle id.
     #[error("no tracked transaction for this handle id")]
     UnknownHandle,
+    /// The transaction already reached a terminal state — nothing to cancel.
     #[error("the transaction already settled — nothing to cancel")]
     CancelTerminal,
+    /// Policy denied the intent.
     #[error(transparent)]
     Denied(PolicyRejection),
+    /// An RPC call failed.
     #[error(transparent)]
     Rpc(#[from] RpcError),
+    /// Fee estimation/bumping failed.
     #[error(transparent)]
     Gas(#[from] GasOracleError),
+    /// Policy evaluation failed operationally.
     #[error(transparent)]
     Policy(#[from] PolicyEngineError),
+    /// Nonce allocation/reconciliation failed.
     #[error(transparent)]
     Nonce(#[from] NonceManagerError),
+    /// Signing failed.
     #[error(transparent)]
     Signer(#[from] SignerError),
+    /// A durable-store operation failed.
     #[error(transparent)]
     Store(#[from] StateStoreError),
+    /// Broadcasting failed.
     #[error(transparent)]
     Submission(#[from] SubmissionError),
 }

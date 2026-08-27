@@ -1,3 +1,5 @@
+//! [`StateStore`] — the durable-state port (nonce state + tx handles) accessed via CAS.
+
 use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -6,7 +8,9 @@ use async_trait::async_trait;
 /// absent, so [`Versioned::default`] is the "not yet stored" state.
 #[derive(Debug, Clone, Default)]
 pub struct Versioned<T> {
+    /// The stored value.
     pub value: T,
+    /// Its CAS version; `0` = absent.
     pub version: u64,
 }
 
@@ -59,11 +63,13 @@ pub enum StateStoreError {
     /// A backend I/O / query failure (redb, Postgres, …). Retryable.
     #[error("state store backend error: {source}")]
     Backend {
+        /// The underlying backend failure.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// Encoding/decoding a persisted value failed (corrupt record / schema drift). Terminal.
     #[error("state (de)serialization failed: {source}")]
     Serialization {
+        /// The underlying (de)serialization failure.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The write carried a fence token lower than the highest committed for the scope — a

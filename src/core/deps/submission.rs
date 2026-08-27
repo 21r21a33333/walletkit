@@ -1,3 +1,5 @@
+//! [`SubmissionStrategy`] — the transaction-broadcast port (public mempool, private relay, …).
+
 use crate::core::deps::RpcError;
 use alloy_primitives::{Bytes, TxHash};
 use async_trait::async_trait;
@@ -5,12 +7,15 @@ use async_trait::async_trait;
 /// Broadcasts a signed, RLP-encoded transaction and returns its hash.
 #[async_trait]
 pub trait SubmissionStrategy: Send + Sync {
+    /// Broadcast `signed_rlp` and return the transaction hash.
     async fn submit(&self, signed_rlp: Bytes) -> Result<TxHash, SubmissionError>;
 }
 
+/// Why a broadcast failed; its predicates classify the failure for the executor.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SubmissionError {
+    /// The underlying RPC broadcast call failed.
     #[error(transparent)]
     Rpc(#[from] RpcError),
 }

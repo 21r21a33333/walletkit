@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 /// nonces (from released reservations) to recycle lowest-first.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NonceState {
+    /// The next never-allocated nonce.
     pub next: u64,
+    /// Freed nonces from released reservations, recycled lowest-first before `next`.
     pub free: BTreeSet<u64>,
 }
 
@@ -14,10 +16,12 @@ pub struct NonceState {
 /// lane can be added here without changing the manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NonceScope {
+    /// The account (EOA) whose nonce sequence this scope tracks.
     pub account: Address,
 }
 
 impl NonceScope {
+    /// The scope for a plain EOA — one nonce sequence per account.
     pub fn eoa(account: Address) -> Self {
         Self { account }
     }

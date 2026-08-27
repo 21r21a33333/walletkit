@@ -1,6 +1,6 @@
-//! `Multicall` — a small read-only builder over Multicall3 `aggregate3`, mirroring the
-//! garden-rs multicall wrapper: accumulate `(target, calldata)` pairs with per-call
-//! failure isolation, execute in one (chunked) round-trip, and get back a
+//! `Multicall` — a small read-only builder over Multicall3 `aggregate3`: accumulate
+//! `(target, calldata)` pairs with per-call failure isolation, execute in one (chunked)
+//! round-trip, and get back a
 //! `Vec<MulticallResult>` the caller decodes per its own type. Encapsulates the
 //! Multicall3 ABI, the canonical address, and the node-cap chunking so callers batch
 //! reads without touching any of it.
@@ -29,7 +29,7 @@ alloy_sol_types::sol! {
     }
 }
 
-/// One sub-call's outcome: a success flag plus the raw return bytes (garden-rs shape).
+/// One sub-call's outcome: a success flag plus the raw return bytes.
 #[derive(Debug, Clone)]
 pub struct MulticallResult {
     pub success: bool,

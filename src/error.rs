@@ -26,8 +26,10 @@ pub enum ErrorKind {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WalletKitError {
+    /// An RPC call failed.
     #[error(transparent)]
     Rpc(RpcError),
+    /// Signing failed (gate trip, malformed payload, or backend error).
     #[error(transparent)]
     Signer(SignerError),
     /// Policy denied the intent — carries the exact rule + offending field.
@@ -36,12 +38,16 @@ pub enum WalletKitError {
     /// The policy engine failed operationally (load/eval), distinct from a denial.
     #[error(transparent)]
     PolicyEngine(PolicyEngineError),
+    /// Fee estimation or bumping failed.
     #[error(transparent)]
     Gas(GasOracleError),
+    /// Nonce allocation or reconciliation failed.
     #[error(transparent)]
     Nonce(NonceManagerError),
+    /// Broadcasting the transaction failed.
     #[error(transparent)]
     Submission(SubmissionError),
+    /// A durable-store operation failed.
     #[error(transparent)]
     Store(StateStoreError),
     /// A chain read failed (RPC transport or on-chain decode).
@@ -54,13 +60,26 @@ pub enum WalletKitError {
     /// discovery read).
     #[error(transparent)]
     Account(AccountError),
+    /// Pre-send simulation rejected the intent (it would revert).
     #[error("simulation rejected: {reason}")]
-    Simulation { reason: String },
+    Simulation {
+        /// The decoded revert/rejection reason.
+        reason: String,
+    },
+    /// The signer's address does not control the intent's account.
     #[error("signer {signer} does not control the intent account {intent}")]
-    AccountMismatch { intent: Address, signer: Address },
+    AccountMismatch {
+        /// The intent's declared account.
+        intent: Address,
+        /// The signer's actual address.
+        signer: Address,
+    },
     /// A cancel could not proceed: the handle is unknown or already settled.
     #[error("cannot cancel: {reason}")]
-    Cancel { reason: &'static str },
+    Cancel {
+        /// Why the cancel could not proceed.
+        reason: &'static str,
+    },
     /// A convenience-constructor setup failure: a malformed RPC URL or a transport that
     /// could not be built.
     #[error("connection setup failed: {0}")]

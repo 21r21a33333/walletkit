@@ -51,6 +51,11 @@ All notable changes to walletkit are documented here. The format follows
   `docs.rs` metadata builds all-feature docs. Publishing prep: crates.io package name
   `walletkit-rs` with `[lib] name = "walletkit"` (import path unchanged), broader
   `categories`, and a `documentation` link.
+- **Documentation pass** (#11): every public item is now documented, enforced by a
+  `#![deny(missing_docs)]` gate; the crate root gains a feature-flag table and design
+  pointer. New maintenance gates keep it that way — CI requires a `CHANGELOG.md` entry for
+  any `src/` change (skippable via a `skip-changelog` label), and the documentation
+  conventions are recorded in `CONTRIBUTING.md`.
 
 ### Changed
 - **crates.io package name is `walletkit-rs`** (the `walletkit` name is taken); the library

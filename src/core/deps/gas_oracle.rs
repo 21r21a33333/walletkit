@@ -1,3 +1,5 @@
+//! [`GasOracle`] — the EIP-1559 fee-pricing port.
+
 use crate::core::deps::RpcError;
 use alloy_eips::eip1559::Eip1559Estimation;
 use async_trait::async_trait;
@@ -14,12 +16,19 @@ pub trait GasOracle: Send + Sync {
     async fn bump(&self, prev: Eip1559Estimation) -> Result<Eip1559Estimation, GasOracleError>;
 }
 
+/// Why fee pricing failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum GasOracleError {
+    /// The underlying RPC call failed.
     #[error(transparent)]
     Rpc(#[from] RpcError),
     /// Bumped max fee would exceed the per-tx ceiling — stop bumping, don't overpay.
     #[error("bumped max fee {needed} wei exceeds ceiling {ceiling} wei")]
-    CeilingExceeded { ceiling: u128, needed: u128 },
+    CeilingExceeded {
+        /// The configured per-tx max-fee ceiling (wei).
+        ceiling: u128,
+        /// The max fee the bump would have required (wei).
+        needed: u128,
+    },
 }

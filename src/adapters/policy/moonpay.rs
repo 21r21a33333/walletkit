@@ -38,6 +38,8 @@ enum Rule {
     ExpiresAtUnix(i64),
 }
 
+/// The MoonPay Open Wallet Standard [`PolicyEngine`]: native
+/// declarative rules plus an optional sandboxed `wasip1` `executable` (feature `policy-moonpay`).
 pub struct MoonPayPolicyEngine {
     rules: Vec<Rule>,
     executable: Option<WasmPlugin>,

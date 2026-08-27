@@ -12,11 +12,17 @@ pub type IntentHash = B256;
 /// is what a policy approval authorizes and what the executor tracks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxIntent {
+    /// EIP-155 chain id the transaction is bound to (replay protection).
     pub chain_id: u64,
+    /// The sender; also the account whose nonce and policy apply.
     pub account: Address,
+    /// Recipient for a call, or [`TxKind::Create`] for contract deployment.
     pub to: TxKind,
+    /// Value in wei to transfer.
     pub value: U256,
+    /// Calldata: an ABI-encoded call, constructor bytecode, or empty for a plain transfer.
     pub input: Bytes,
+    /// Optional human-readable label for logs/policy; excluded from the signed bytes.
     pub purpose: Option<String>,
 }
 

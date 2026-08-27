@@ -27,7 +27,9 @@ pub enum Finality {
 /// The finality rule for a cycle: the mode plus the depth used in [`Finality::Depth`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalityConfig {
+    /// Which finality rule applies.
     pub mode: Finality,
+    /// Confirmation depth used under [`Finality::Depth`].
     pub required: u64,
 }
 
@@ -35,7 +37,9 @@ pub struct FinalityConfig {
 /// [`Finality::Finalized`]; `latest` drives the depth count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChainView {
+    /// Latest block height.
     pub latest: u64,
+    /// Latest finalized block height.
     pub finalized: u64,
 }
 
@@ -44,7 +48,9 @@ pub struct ChainView {
 /// gas — so it settles as `Failed`, not a retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// The transaction executed successfully (receipt status `1`).
     Executed,
+    /// The transaction reverted (receipt status `0`) — still mined, still consumed its nonce.
     Reverted,
 }
 
@@ -60,8 +66,11 @@ pub enum ChainEvent {
     /// One of our broadcasts is canonically mined here (receipt hash-anchored to
     /// `block`). A re-mine in a new block simply arrives as a fresh `Mined`.
     Mined {
+        /// Block the receipt is anchored to.
         block: u64,
+        /// Hash of that block (reorg detection).
         block_hash: B256,
+        /// Whether it executed or reverted.
         outcome: Outcome,
     },
     /// A foreign transaction consumed our nonce — always a different sender's tx,

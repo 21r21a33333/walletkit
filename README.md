@@ -110,7 +110,7 @@ let wallet = Wallet::builder(rpc, std::sync::Arc::new(signer), policy).build();
 
 ## Status
 
-Design locked; Phase 1 (EVM Execution Core) implementation in progress — the read /
-preview / ENS / pricing DX seams (sub-project F1), HD account management (F2), and the
-ergonomics layer (F3: convenience constructors, prelude, policy `validate`, examples) are
-implemented.
+Pre-1.0 and evolving (minor releases may break, per the [changelog](CHANGELOG.md)). The
+Phase-1 EVM execution core is complete: transaction execution with policy-gated signing,
+durable state and crash recovery, a resilient RPC transport, reads/preview/ENS/pricing,
+and HD account management. See [SPEC.md](SPEC.md) for the full roadmap.

@@ -27,6 +27,8 @@ use alloy_primitives::Address;
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// The [`NonceManager`] backed by a [`StateStore`] CAS,
+/// under the single-writer-per-account fencing default.
 pub struct LocalNonceManager {
     store: Arc<dyn StateStore>,
     rpc: Arc<dyn Rpc>,
@@ -36,6 +38,7 @@ pub struct LocalNonceManager {
 }
 
 impl LocalNonceManager {
+    /// Build over a durable store and an RPC (for chain reconciliation).
     pub fn new(store: Arc<dyn StateStore>, rpc: Arc<dyn Rpc>) -> Self {
         Self {
             store,

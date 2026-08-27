@@ -31,6 +31,9 @@ use alloy_rpc_types_eth::{AccessListResult, TransactionReceipt, TransactionReque
 use alloy_transport::{RpcError as AlloyRpcError, TransportError};
 use async_trait::async_trait;
 
+/// The one concrete [`Rpc`] adapter: an alloy provider
+/// (type-erased to `DynProvider`) with alloy's failover/retry layers. Build it via
+/// [`Transport::builder`], [`Transport::url`], or [`Transport::from_config`].
 pub struct Transport {
     provider: DynProvider,
 }

@@ -71,6 +71,26 @@ jobs:
       - name: Check each feature
         run: cargo hack check --each-feature --locked
 
+  # Keep the changelog honest: any change under src/ must record a user-facing entry.
+  # Apply the `skip-changelog` label for pure refactors/CI-only PRs.
+  changelog:
+    name: changelog updated
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-changelog')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a CHANGELOG entry for code changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE"...HEAD)
+          if echo "$changed" | grep -q '^src/' && ! echo "$changed" | grep -qx 'CHANGELOG.md'; then
+            echo "::error::src/ changed but CHANGELOG.md was not updated. Add an entry under [Unreleased], or apply the 'skip-changelog' label."
+            exit 1
+          fi
+
   postgres:
     name: postgres backend tests
     runs-on: ubuntu-latest

@@ -7,6 +7,7 @@ use crate::core::deps::RpcError;
 use alloy_primitives::Address;
 use async_trait::async_trait;
 
+/// Object-safe ENS name resolution over plain RPC (forward, reverse, and text records).
 #[async_trait]
 pub trait EnsResolver: Send + Sync {
     /// Resolve a name to its address, or `None` if unset/unregistered.
@@ -23,9 +24,11 @@ pub trait EnsResolver: Send + Sync {
     }
 }
 
+/// Why ENS resolution failed operationally (distinct from "no record", which is `Ok(None)`).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EnsError {
+    /// The underlying RPC call failed.
     #[error(transparent)]
     Rpc(#[from] RpcError),
     /// The name needs EIP-3668 CCIP-Read (an offchain/L2 name — Basenames `*.base.eth`,
@@ -36,5 +39,8 @@ pub enum EnsError {
     /// An ENS-specific operational failure (bad resolver, malformed name). Distinct from
     /// "no record", which is `Ok(None)`.
     #[error("ens resolution failed: {detail}")]
-    Resolution { detail: String },
+    Resolution {
+        /// What went wrong (bad resolver, malformed name).
+        detail: String,
+    },
 }

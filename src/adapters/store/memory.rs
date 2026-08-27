@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
+/// The non-durable [`StateStore`]: keeps nonce state and
+/// handles in memory. Recovery is single-run only; use redb/Postgres to survive a restart.
 #[derive(Default)]
 pub struct InMemoryStateStore {
     nonces: Mutex<HashMap<NonceScope, (Versioned<NonceState>, FenceToken)>>,

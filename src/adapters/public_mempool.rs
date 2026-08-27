@@ -8,11 +8,14 @@ use alloy_primitives::{Bytes, TxHash};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// The default [`SubmissionStrategy`]: broadcast
+/// straight to the public mempool via `eth_sendRawTransaction`.
 pub struct PublicMempool {
     rpc: Arc<dyn Rpc>,
 }
 
 impl PublicMempool {
+    /// Build over an RPC transport.
     pub fn new(rpc: Arc<dyn Rpc>) -> Self {
         Self { rpc }
     }

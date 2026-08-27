@@ -3,6 +3,7 @@
 use crate::core::deps::Clock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The production [`Clock`]: reads the OS wall clock in unix seconds.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
