@@ -6,6 +6,18 @@ It is a **client-side facade, not a custody service**: it integrates MPC/TEE sig
 
 See [SPEC.md](SPEC.md) for the full design specification: architecture, the 7-phase roadmap, locked decisions, and cross-cutting invariants.
 
+## Install
+
+```sh
+cargo add walletkit-rs
+```
+
+The crates.io package is `walletkit-rs`; the library imports as `walletkit`:
+
+```rust
+use walletkit::prelude::*;
+```
+
 ## Quickstart
 
 `use walletkit::prelude::*;` brings the facade, the port traits, and the common alloy

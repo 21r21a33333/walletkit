@@ -5771,7 +5771,7 @@ dependencies = [
 
 [[package]]
 name = "walletkit-rs"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
