@@ -50,7 +50,11 @@ impl TxIntent {
     /// hash is stable within a process — but it is not persisted across alloy
     /// versions; switch to `alloy_rlp` if that ever changes.
     pub fn hash(&self) -> IntentHash {
-        keccak256(serde_json::to_vec(self).expect("TxIntent is serializable"))
+        // Infallible: `TxIntent` is a plain struct of alloy scalars with no map keys or
+        // custom `Serialize`, and the `Vec` sink cannot do I/O — `to_vec` never errors.
+        #[allow(clippy::expect_used)]
+        let bytes = serde_json::to_vec(self).expect("TxIntent is serializable");
+        keccak256(bytes)
     }
 
     /// The 4-byte function selector, for a `Call` carrying at least a selector's

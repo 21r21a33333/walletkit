@@ -1,6 +1,6 @@
 //! In-memory `StateStore`: a versioned map of `scope -> nonce state` plus persisted
 //! handles. Non-durable, so recovery is single-run — the durable backends are
-//! [`redb`](super::redb) and [`postgres`](super::postgres).
+//! the feature-gated `redb` and `postgres` stores.
 
 use crate::core::deps::{StateStore, StateStoreError, Versioned};
 use crate::core::wallet::{FenceToken, HandleId, NonceScope, NonceState, TxHandle};

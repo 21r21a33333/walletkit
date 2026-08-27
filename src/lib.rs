@@ -1,3 +1,13 @@
+// `--cfg docsrs` (set by docs.rs) turns on per-item `doc(cfg(...))` feature badges.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// Doc links must resolve to public items — no dangling or private-item links escape review.
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
+// The no-panic house rule, enforced. Relaxed under `cfg(test)` so unit tests may `unwrap`.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 //! walletkit — a client-side ergonomic facade over [alloy] for wallet
 //! infrastructure and transaction execution.
 //!

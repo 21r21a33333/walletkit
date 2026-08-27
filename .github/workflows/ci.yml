@@ -28,15 +28,48 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       # The trait + InMemoryStateStore must still compile with every backend/tracing
       # feature stripped (the embedded-nothing path a minimal dependent builds).
       - name: Clippy (no default features)
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
       # localnet integration tests skip cleanly when anvil/Foundry is absent, so the
       # full suite runs here without a node.
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
+      # Docs must build clean with every feature on (matching docs.rs). Broken/private
+      # intra-doc links are denied in the crate root; `-D warnings` catches the rest.
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features --locked
+
+  msrv:
+    name: msrv (1.94.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin the declared floor (Cargo.toml `rust-version`, inherited from alloy). If a
+      # dependency bump raises the real minimum, this job fails and prompts an honest
+      # `rust-version` update rather than letting the manifest drift out of truth.
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (all features, locked)
+        run: cargo check --all-features --locked
+
+  feature-matrix:
+    name: feature matrix (cargo-hack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      # Features are purely additive: each must compile alone, with none, and with all.
+      - name: Check each feature
+        run: cargo hack check --each-feature --locked
 
   postgres:
     name: postgres backend tests
@@ -62,6 +95,6 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy (postgres)
-        run: cargo clippy --all-targets --features postgres -- -D warnings
+        run: cargo clippy --all-targets --features postgres --locked -- -D warnings
       - name: Test (postgres)
-        run: cargo test --all-targets --features postgres
+        run: cargo test --all-targets --features postgres --locked

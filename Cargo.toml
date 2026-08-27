@@ -1,15 +1,40 @@
+# The crates.io name is `walletkit-rs` (the `walletkit` name belongs to Worldcoin's
+# World ID crate); the library name below stays `walletkit`, so downstream code still
+# writes `use walletkit::…` regardless of the package name.
 [package]
-name = "walletkit"
+name = "walletkit-rs"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
-description = "Client-side ergonomic facade over alloy for wallet infrastructure and transaction execution"
+# Inherited from alloy's rolling MSRV (2.4.1 needs 1.94.1); wasmtime's `policy-moonpay`
+# floor (1.86) is lower, so alloy sets the crate-wide minimum. CI pins this exact value.
+rust-version = "1.94.1"
+description = "Rust wallet-infrastructure facade over alloy: safe EVM tx execution with swappable key backends, un-bypassable policy, and a robust tx lifecycle"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/21r21a33333/walletkit"
+documentation = "https://docs.rs/walletkit-rs"
 readme = "README.md"
 keywords = ["ethereum", "evm", "wallet", "alloy", "transaction"]
-categories = ["cryptography::cryptocurrencies"]
+categories = [
+    "cryptography::cryptocurrencies",
+    "api-bindings",
+    "network-programming",
+    "asynchronous",
+]
 publish = false
+
+[lib]
+name = "walletkit"
+
+# Build docs with every feature on docs.rs, and set `--cfg docsrs` so feature-gated
+# items can carry `#[cfg_attr(docsrs, doc(cfg(...)))]` availability badges.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Supply-chain / correctness lints enforced crate-wide (the per-target unwrap/expect/panic
+# bans that must relax under `cfg(test)` live in `src/lib.rs`, not here).
+[lints.rust]
+unsafe_code = "forbid"
 
 [dependencies]
 alloy-consensus = "2.4.1"

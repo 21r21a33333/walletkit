@@ -1,0 +1,29 @@
+name: supply-chain
+
+# Report-only: surfaces advisory / license / ban / source findings without blocking
+# merges (`continue-on-error`). Runs on PRs that touch the dependency graph, and weekly
+# so an advisory filed against otherwise-unchanged code still gets noticed. Promote to a
+# hard gate later by removing `continue-on-error`.
+on:
+  pull_request:
+    paths: [Cargo.toml, Cargo.lock, deny.toml, .github/workflows/supply-chain.yml]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# cargo-deny's advisory check reads the same RustSec database as cargo-audit and adds
+# license/ban/source auditing, so it stands in for both — one tool, no redundant job.
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories · licenses · bans · sources)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --all-features check

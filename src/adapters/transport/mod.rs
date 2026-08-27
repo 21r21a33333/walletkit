@@ -1,7 +1,7 @@
 //! `Transport` — the one concrete [`Rpc`] adapter. It wraps an alloy provider
 //! (type-erased into a [`DynProvider`], so the struct is concrete and non-generic)
 //! and reuses alloy's transport layers for reliability. Construction lives in
-//! [`build`]: [`Transport::builder`] for full control, [`Transport::url`] for a
+//! `build`: [`Transport::builder`] for full control, [`Transport::url`] for a
 //! single HTTP endpoint, or [`Transport::from_config`] from a declarative
 //! [`TransportConfig`] (per-chain, config-file friendly).
 //!

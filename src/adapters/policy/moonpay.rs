@@ -8,7 +8,7 @@
 //!      constrain a plain transaction intent (parsed, not applied here);
 //! 2. an optional **`executable`** — a user-supplied `wasip1` plugin that receives
 //!    the OWS `PolicyContext` JSON on stdin and returns `{"allow":bool,"reason"?}`
-//!    on stdout. We run it in the hardened [`WasmPlugin`](super::wasm) sandbox
+//!    on stdout. We run it in the hardened `WasmPlugin` sandbox
 //!    instead of OWS's subprocess model.
 //!
 //! Semantics: a violated declarative rule denies immediately (deny short-circuits,
