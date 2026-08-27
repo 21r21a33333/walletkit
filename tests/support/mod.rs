@@ -9,6 +9,8 @@
 //! per-binary `dead_code` is expected and silenced here.
 #![allow(dead_code)]
 
+pub mod fault;
+
 use alloy_node_bindings::{Anvil, AnvilInstance};
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -33,7 +35,7 @@ use walletkit::adapters::PostgresStateStore;
 use walletkit::adapters::RedbStateStore;
 use walletkit::adapters::policy::{DefaultPolicyEngine, TargetAllowlist};
 use walletkit::adapters::{InMemoryStateStore, LocalSigner, SystemClock, Transport};
-use walletkit::core::deps::{Clock, PolicyEngine, Signer, StateStore};
+use walletkit::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use walletkit::core::wallet::TxIntent;
 
 /// Anvil's default dev mnemonic (Foundry default) — the first 10 accounts are funded.
@@ -93,7 +95,7 @@ impl Localnet {
             .address();
         let (store, _store_tmp) = build_store(backend, account).await?;
         let wallet = build_wallet(
-            &endpoint,
+            rpc_for(&endpoint)?,
             account_index,
             store.clone(),
             confirmations,
@@ -120,7 +122,7 @@ impl Localnet {
     pub fn rebuild_wallet(&self) -> Arc<Wallet> {
         Arc::new(
             build_wallet(
-                &self.endpoint,
+                rpc_for(&self.endpoint).expect("transport"),
                 self.account_index,
                 self.store.clone(),
                 self.confirmations,
@@ -134,13 +136,31 @@ impl Localnet {
     pub fn refill_wallet(&self) -> Arc<Wallet> {
         Arc::new(
             build_wallet(
-                &self.endpoint,
+                rpc_for(&self.endpoint).expect("transport"),
                 self.account_index,
                 self.store.clone(),
                 self.confirmations,
                 true,
             )
             .expect("refill wallet"),
+        )
+    }
+
+    /// A wallet whose transport is wrapped in a [`FaultRpc`](fault::FaultRpc) driven by the
+    /// returned [`Faults`](fault::Faults) switch board — for the confirmation-safety tests.
+    /// Same store as the harness default.
+    pub fn fault_wallet(&self, faults: &Arc<fault::Faults>) -> Arc<Wallet> {
+        let inner = rpc_for(&self.endpoint).expect("transport");
+        let rpc: Arc<dyn Rpc> = Arc::new(fault::FaultRpc::new(inner, faults.clone()));
+        Arc::new(
+            build_wallet(
+                rpc,
+                self.account_index,
+                self.store.clone(),
+                self.confirmations,
+                false,
+            )
+            .expect("fault wallet"),
         )
     }
 
@@ -340,23 +360,28 @@ async fn build_store(
     }
 }
 
-/// Build a `Wallet` over `account_index`, an allow-`RECIPIENT` policy, and `store`.
+/// A real [`Transport`] over `endpoint`, type-erased to the [`Rpc`] port so callers can wrap
+/// it (e.g. in a [`FaultRpc`](fault::FaultRpc)) before building a wallet.
+fn rpc_for(endpoint: &Url) -> Option<Arc<dyn Rpc>> {
+    Some(Arc::new(Transport::url(endpoint.clone()).ok()?))
+}
+
+/// Build a `Wallet` over `rpc`, `account_index`, an allow-`RECIPIENT` policy, and `store`.
 fn build_wallet(
-    endpoint: &Url,
+    rpc: Arc<dyn Rpc>,
     account_index: u32,
     store: Arc<dyn StateStore>,
     confirmations: u64,
     refill_on_replaced: bool,
 ) -> Option<Wallet> {
     let signer = LocalSigner::from_mnemonic(ANVIL_MNEMONIC, account_index).ok()?;
-    let transport = Transport::url(endpoint.clone()).ok()?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(
         vec![Box::new(TargetAllowlist::new([RECIPIENT]))],
         clock,
     ));
     Some(
-        Wallet::builder(Arc::new(transport), Arc::new(signer), policy)
+        Wallet::builder(rpc, Arc::new(signer), policy)
             .confirmations(confirmations)
             .bump_timeout(0)
             .gas_ceiling(u128::MAX)
