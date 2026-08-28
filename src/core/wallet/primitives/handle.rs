@@ -1,4 +1,5 @@
 use super::{GasEnvelope, IntentHash, TxIntent};
+use crate::core::deps::SubmissionOpts;
 use alloy_primitives::{Address, B256, Bytes, TxHash, keccak256};
 use serde::{Deserialize, Serialize};
 
@@ -109,4 +110,9 @@ pub struct TxHandle {
     /// Set by `cancel(id)`: its nonce being consumed settles the handle as `Dropped`.
     #[serde(default)]
     pub cancelled: bool,
+    /// How this transaction is broadcast. Persisted so bumps and crash-recovery re-send on
+    /// the original route — a private tx must never leak to the public mempool on a bump or
+    /// after a restart. Absent in legacy records ⇒ `Public`.
+    #[serde(default)]
+    pub submission: SubmissionOpts,
 }

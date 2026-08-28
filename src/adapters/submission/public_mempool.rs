@@ -28,17 +28,13 @@ impl SubmissionStrategy for PublicMempool {
     async fn submit(
         &self,
         signed_rlp: Bytes,
-        opts: &SubmissionOpts,
+        _opts: &SubmissionOpts,
     ) -> Result<TxHash, SubmissionError> {
-        // The Router sends only `Public` here; a `Private` route reaching the public mempool
-        // would be a routing-invariant break, so broadcasting it publicly could leak a tx
-        // meant to stay private. Assert in debug; in release, still broadcast (liveness).
-        debug_assert!(
-            matches!(opts.route, SubmissionRoute::Public),
-            "PublicMempool received a non-public route: {:?}",
-            opts.route
-        );
         debug!("broadcasting signed transaction");
         Ok(self.rpc.send_raw(signed_rlp).await?)
+    }
+
+    fn supports_route(&self, route: &SubmissionRoute) -> bool {
+        matches!(route, SubmissionRoute::Public)
     }
 }

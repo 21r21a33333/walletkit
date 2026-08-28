@@ -28,6 +28,6 @@ pub use rpc::{AccountActivity, Rpc, RpcError, Simulated};
 pub use signer::{Signer, SignerError};
 pub use state_store::{StateStore, StateStoreError, Versioned};
 pub use submission::{
-    Escalation, Hints, PrivateRoute, Relay, RouteError, SubmissionError, SubmissionOpts,
-    SubmissionRoute, SubmissionStrategy,
+    Escalation, Flashbots, Hints, PrivateRoute, Protect, ProtectRelay, RouteError, SubmissionError,
+    SubmissionOpts, SubmissionRoute, SubmissionStrategy,
 };

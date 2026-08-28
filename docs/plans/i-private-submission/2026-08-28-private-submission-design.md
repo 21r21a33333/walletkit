@@ -1,6 +1,8 @@
 # I — Private submission (MEV protection): design
 
-**Sub-project:** I (the first slice of Phase 2 — the submission-route core + private/MEV-protected broadcast). **Date:** 2026-08-28. **Status:** design, pending review.
+**Sub-project:** I (the first slice of Phase 2 — the submission-route core + private/MEV-protected broadcast). **Date:** 2026-08-28. **Status:** implemented (Phases 1–2), with the refinements below.
+
+> **Implementation refinements (idiomatic pass).** The final code improves on §4/§7 of this spec in three ways: (1) **type-state routes** — `PrivateRoute::Flashbots(Flashbots) | Protect(Protect)` with the `block_window`/`fast`/`hints` knobs living *only* on `Flashbots`, so a generic relay structurally can't carry them (the "make the unsafe path unrepresentable" rule). This deletes the runtime `PrivateRoute::validate()` and the `GenericRelayOptions` error. (2) **No capability flag** — the "is a relay configured" check is a `SubmissionStrategy::supports_route` method the `Router` implements (private arm is `Option`), checked up front by the pipeline; there is no `private_routing` bool on `Wallet`. (3) **Ergonomic constructors** — `Flashbots::new(esc).fast().within(n)`, `Protect::mev_blocker(esc)`, `impl Into<SubmissionOpts>` on `send_with`, and `relay_identity` (not `with_relay_identity`, matching the builder's bare-verb convention). The relay-error variants carry a `message` (with relay name) rather than a `Relay` field.
 
 ## 1. Goal & scope
 

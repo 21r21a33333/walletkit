@@ -46,6 +46,32 @@ Runnable end-to-end examples live in [`examples/`](examples): `cargo run --examp
 Preview before sending: `wallet.dry_run(&intent)` (what happens on-chain) and
 `wallet.validate(&intent)` (would the policy allow it).
 
+## Private submission (MEV protection)
+
+Route the **same signed intent** through a private relay instead of the public mempool —
+same intent, same policy, same hash, no front-running. Supply the endpoint-auth identity
+(a rotatable key, distinct from the tx key), then choose a route per send:
+
+```rust
+let wallet = Wallet::builder(rpc, signer, policy)
+    .relay_identity(identity)   // enables private routing
+    .build();
+
+// Flashbots — the inclusion knobs exist only on this route type:
+wallet.send_with(&intent, Flashbots::new(Escalation::StayPrivate).fast().within(25)).await?;
+
+// A generic Protect relay — no knobs to misuse:
+wallet.send_with(&intent, Protect::mev_blocker(Escalation::StayPrivate)).await?;
+```
+
+Routes are **type-state**: `Flashbots` carries the `eth_sendPrivateTransaction` knobs
+(`within(n)`/`fast()`/`reveal(hints)`); `Protect` (`mev_blocker`/`bloxroute`/`custom`) is a
+plain Protect RPC and *cannot* carry them — an invalid combination doesn't compile. The chosen
+route is persisted, so bumps and crash-recovery re-broadcast **privately** — a private tx never
+silently leaks to the public mempool. `Escalation::PublicAfter { cycles }` opts into a loud,
+persisted fallback to public if a tx won't land; `StayPrivate` keeps retrying privately.
+Without a relay identity, a private send fails cleanly (before signing) rather than leaking.
+
 ## RPC layer — eRPC recommended
 
 walletkit's `Transport` reuses alloy's transport layers (retry/backoff + multi-endpoint

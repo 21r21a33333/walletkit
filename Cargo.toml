@@ -68,6 +68,11 @@ coins-bip39 = { version = "0.12", default-features = false, features = ["english
 parking_lot = "0.12"
 # OS CSPRNG for fail-closed mnemonic entropy (matches coins-bip39's rand major).
 rand = "0.8"
+# Private-relay HTTP: the Flashbots eth_sendPrivateTransaction POST needs a per-request
+# X-Flashbots-Signature header alloy's provider can't add. No features of our own — the TLS
+# backend is inherited (feature-unioned) from alloy-transport-http's reqwest, so we don't
+# fork the tree; JSON bodies are built/parsed with serde_json.
+reqwest = { version = "0.13.4", default-features = false }
 # Durable embedded StateStore backend (pure-Rust ACID KV); opt-in via the `redb` feature.
 redb = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"] }

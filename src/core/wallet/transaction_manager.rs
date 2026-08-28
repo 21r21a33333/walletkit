@@ -6,7 +6,7 @@
 use super::signing;
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
-    PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
+    PolicyEngineError, RouteError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
     SubmissionError, SubmissionOpts, SubmissionStrategy,
 };
 use crate::core::wallet::{
@@ -140,6 +140,13 @@ impl TransactionManager {
     /// Estimate (also the pre-sign revert gate) → fees → policy → allocate → build →
     /// sign → persist → submit. A nonce is allocated only after policy Allow and
     /// released if any later step fails, so a denied or failed send never leaves a gap.
+    pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, TransactionManagerError> {
+        self.send_with(intent, &SubmissionOpts::default()).await
+    }
+
+    /// Like [`send`](Self::send) but routing the broadcast per `opts` (public mempool or a
+    /// private relay). The route is validated up front and persisted on the handle so bumps
+    /// and crash-recovery re-send on the original route.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -149,7 +156,15 @@ impl TransactionManager {
             fields(intent_hash = ?intent.hash(), account = %intent.account, chain_id = intent.chain_id)
         )
     )]
-    pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, TransactionManagerError> {
+    pub async fn send_with(
+        &self,
+        intent: &TxIntent,
+        opts: &SubmissionOpts,
+    ) -> Result<TxHandle, TransactionManagerError> {
+        // Fail fast (before any nonce or chain touch) if the strategy can't honor the route.
+        if !self.submission.supports_route(&opts.route) {
+            return Err(RouteError::RelayNotConfigured.into());
+        }
         let account = intent.account;
         // The nonce is allocated for `account`; signing with a different key would put
         // it on the wrong sender. Fail before touching the chain or a nonce.
@@ -190,7 +205,7 @@ impl TransactionManager {
         debug!(nonce, "nonce allocated");
         // `build_sign_submit` owns the nonce lifecycle: it recycles the nonce only when
         // nothing was broadcast, so a live tx's nonce is never freed for reuse.
-        self.build_sign_submit(intent, gas_limit, fees, nonce, approval)
+        self.build_sign_submit(intent, gas_limit, fees, nonce, approval, opts)
             .await
     }
 
@@ -256,6 +271,9 @@ impl TransactionManager {
             broadcasts: vec![signed.hash],
             last_broadcast_at: now,
             cancelled: false,
+            // The cancel rides the same route as the tx it replaces (a private tx's cancel
+            // stays private).
+            submission: target.submission.clone(),
         };
         self.state_store.put_handle(&cancel).await?;
         info!(nonce = target.nonce, "cancel submitted");
@@ -282,7 +300,7 @@ impl TransactionManager {
                 signing::sign_encode(&*self.signer, tx, intent_hash, approval, now).await?;
             match self
                 .submission
-                .submit(signed.rlp.clone(), &SubmissionOpts::default())
+                .submit(signed.rlp.clone(), &target.submission)
                 .await
             {
                 Ok(_) => return Ok(signed),
@@ -312,6 +330,7 @@ impl TransactionManager {
         fees: Eip1559Estimation,
         nonce: u64,
         approval: PolicyApproval,
+        opts: &SubmissionOpts,
     ) -> Result<TxHandle, TransactionManagerError> {
         let account = intent.account;
         let intent_hash = intent.hash();
@@ -340,6 +359,7 @@ impl TransactionManager {
             broadcasts: vec![signed.hash],
             last_broadcast_at: now,
             cancelled: false,
+            submission: opts.clone(),
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.
@@ -348,11 +368,7 @@ impl TransactionManager {
             return Err(e.into());
         }
 
-        match self
-            .submission
-            .submit(signed.rlp, &SubmissionOpts::default())
-            .await
-        {
+        match self.submission.submit(signed.rlp, opts).await {
             Ok(_) => {}
             // Transient (may be in flight) or already-accepted ("already known"/"nonce
             // too low" -> already sent/mined): assume sent — keep the nonce reserved
@@ -446,6 +462,9 @@ pub enum TransactionManagerError {
     /// Broadcasting failed.
     #[error(transparent)]
     Submission(#[from] SubmissionError),
+    /// The submission route was not valid for the chosen relay.
+    #[error(transparent)]
+    Route(#[from] RouteError),
 }
 
 #[cfg(test)]
