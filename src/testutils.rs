@@ -8,7 +8,7 @@
 use crate::core::deps::{
     AccountActivity, Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError,
     PolicyEngine, PolicyEngineError, Rpc, RpcError, Signer, SignerError, Simulated, StateStore,
-    StateStoreError, SubmissionError, SubmissionStrategy, Versioned,
+    StateStoreError, SubmissionError, SubmissionOpts, SubmissionStrategy, Versioned,
 };
 use crate::core::wallet::{
     AccountExecutor, Decision, FenceToken, GasEnvelope, HandleId, IntentHash, NonceScope,
@@ -76,6 +76,7 @@ pub(crate) fn handle(nonce: u64, status: TxStatus) -> TxHandle {
         broadcasts: vec![TxHash::ZERO],
         last_broadcast_at: 0,
         cancelled: false,
+        submission: SubmissionOpts::default(),
     }
 }
 
@@ -667,14 +668,17 @@ pub(crate) struct MockSubmit {
     pub outcome: Submit,
     /// Every submitted RLP body, in order — for asserting rebroadcast/bump.
     pub seen: Arc<Mutex<Vec<Bytes>>>,
+    /// The route each submit was made on, in order — for asserting private/public routing.
+    pub routes: Arc<Mutex<Vec<crate::core::deps::SubmissionRoute>>>,
     pub log: CallLog,
 }
 
 #[async_trait]
 impl SubmissionStrategy for MockSubmit {
-    async fn submit(&self, rlp: Bytes) -> Result<TxHash, SubmissionError> {
+    async fn submit(&self, rlp: Bytes, opts: &SubmissionOpts) -> Result<TxHash, SubmissionError> {
         note(&self.log, "submit");
         self.seen.lock().push(rlp);
+        self.routes.lock().push(opts.route.clone());
         match self.outcome {
             Submit::Ok => Ok(TxHash::ZERO),
             Submit::Transient => Err(SubmissionError::Rpc(RpcError::Call {

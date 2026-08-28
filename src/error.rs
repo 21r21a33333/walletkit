@@ -4,8 +4,8 @@
 
 use crate::core::accounts::AccountError;
 use crate::core::deps::{
-    EnsError, GasOracleError, NonceManagerError, PolicyEngineError, ReadError, RpcError,
-    SignerError, StateStoreError, SubmissionError,
+    EnsError, GasOracleError, NonceManagerError, PolicyEngineError, ReadError, RouteError,
+    RpcError, SignerError, StateStoreError, SubmissionError,
 };
 use crate::core::wallet::{ExecutorError, PolicyRejection, TransactionManagerError};
 use alloy_primitives::Address;
@@ -84,6 +84,10 @@ pub enum WalletKitError {
     /// could not be built.
     #[error("connection setup failed: {0}")]
     Connect(String),
+    /// A submission route was invalid for its relay (e.g. Flashbots-only options on a
+    /// generic Protect relay).
+    #[error(transparent)]
+    Route(RouteError),
 }
 
 impl WalletKitError {
@@ -110,6 +114,7 @@ impl WalletKitError {
             | Self::Simulation { .. }
             | Self::AccountMismatch { .. }
             | Self::Cancel { .. }
+            | Self::Route(_)
             | Self::Connect(_) => ErrorKind::Terminal,
         }
     }
@@ -216,6 +221,7 @@ impl From<TransactionManagerError> for WalletKitError {
             E::Signer(e) => Self::Signer(e),
             E::Store(e) => Self::Store(e),
             E::Submission(e) => Self::Submission(e),
+            E::Route(e) => Self::Route(e),
         }
     }
 }

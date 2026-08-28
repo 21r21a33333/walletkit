@@ -6,6 +6,24 @@ All notable changes to walletkit are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Private submission / MEV protection** (sub-project I): route the same signed intent
+  through a private relay instead of the public mempool, per-tx via `Wallet::send_with`.
+  `WalletBuilder::relay_identity` supplies the rotatable `X-Flashbots-Signature` endpoint-auth
+  key (distinct from the tx key). Routes are **type-state**: `Flashbots::new(esc).fast().within(n).reveal(hints)`
+  carries the `eth_sendPrivateTransaction` knobs; `Protect::mev_blocker`/`bloxroute`/`custom`
+  are generic Protect RPCs that structurally can't carry them (invalid combos don't compile).
+  The chosen route is persisted on `TxHandle`, so bumps and crash-recovery re-broadcast
+  privately — a private tx never leaks to the public mempool except via an explicit,
+  persisted `Escalation::PublicAfter`. New `SubmissionError` variants `RelayAuth`/`RelayRejected`
+  are never mistaken for "sent"; a private send with no relay configured fails cleanly
+  (`RouteError::RelayNotConfigured`) before signing.
+
+### Changed
+- **`SubmissionStrategy::submit` gained a `&SubmissionOpts` parameter** (pre-1.0 minor =
+  breaking). `TxHandle` gains a `submission` field (defaults to `Public` for legacy
+  records). New dependency: `reqwest` (rustls, for the Flashbots POST).
+
 ## [0.1.0] - 2026-08-27
 
 First release. The complete Phase-1 EVM execution core.

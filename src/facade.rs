@@ -6,9 +6,12 @@
 
 use crate::adapters::policy::{AllowAll, DefaultPolicyEngine};
 use crate::adapters::{
-    InMemoryStateStore, LocalNonceManager, PublicMempool, RpcGasOracle, SystemClock, Transport,
+    InMemoryStateStore, LocalNonceManager, PrivateMev, PublicMempool, Router, RpcGasOracle,
+    SystemClock, Transport,
 };
-use crate::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
+use crate::core::deps::{
+    Clock, PolicyEngine, Rpc, Signer, StateStore, SubmissionOpts, SubmissionStrategy,
+};
 use crate::core::wallet::{
     AccountExecutor, HandleId, PolicyOutcome, SignatureEnvelope, SigningRequest,
     TransactionManager, TxHandle, TxIntent, TxPreview, TxStatus, dry_run,
@@ -16,6 +19,7 @@ use crate::core::wallet::{
 use crate::error::WalletKitError;
 use alloy_dyn_abi::TypedData;
 use alloy_primitives::Address;
+use alloy_signer_local::PrivateKeySigner;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -52,6 +56,7 @@ impl Wallet {
             gas_ceiling: u128::MAX,
             gas_buffer_pct: None,
             refill_on_replaced: false,
+            relay_identity: None,
         }
     }
 
@@ -93,6 +98,19 @@ impl Wallet {
     /// bumping, and confirmation happen on later [`tick`](Wallet::tick)s.
     pub async fn send(&self, intent: &TxIntent) -> Result<TxHandle, WalletKitError> {
         Ok(self.manager.send(intent).await?)
+    }
+
+    /// Like [`send`](Self::send) but choosing the broadcast route via `opts` — pass a
+    /// [`Flashbots`](crate::core::deps::Flashbots) or [`Protect`](crate::core::deps::Protect)
+    /// route directly. A private route requires a relay identity
+    /// ([`WalletBuilder::relay_identity`]); without one the send fails cleanly (before signing)
+    /// rather than leaking to the public mempool.
+    pub async fn send_with(
+        &self,
+        intent: &TxIntent,
+        opts: impl Into<SubmissionOpts>,
+    ) -> Result<TxHandle, WalletKitError> {
+        Ok(self.manager.send_with(intent, &opts.into()).await?)
     }
 
     /// Cancel a pending tx: a policy-gated 0-value self-send at its nonce (RBF). Errors if
@@ -216,6 +234,7 @@ pub struct WalletBuilder {
     gas_ceiling: u128,
     gas_buffer_pct: Option<u128>,
     refill_on_replaced: bool,
+    relay_identity: Option<PrivateKeySigner>,
 }
 
 impl WalletBuilder {
@@ -256,6 +275,15 @@ impl WalletBuilder {
         self
     }
 
+    /// Enable private-relay routing by supplying the endpoint-auth identity (the rotatable
+    /// key that signs the `X-Flashbots-Signature` header — distinct from the tx-signing key).
+    /// Without it, private sends are rejected. Set it, then choose a route per send via
+    /// [`Wallet::send_with`].
+    pub fn relay_identity(mut self, identity: PrivateKeySigner) -> Self {
+        self.relay_identity = Some(identity);
+        self
+    }
+
     /// Wire the runtime. Infallible — the account is `signer.address()` and every port
     /// is supplied, so there is nothing to validate.
     pub fn build(self) -> Wallet {
@@ -266,7 +294,13 @@ impl WalletBuilder {
         let clock: Arc<dyn Clock> = self.clock.unwrap_or_else(|| Arc::new(SystemClock));
         let gas_oracle = Arc::new(RpcGasOracle::new(self.rpc.clone(), self.gas_ceiling));
         let nonce_manager = Arc::new(LocalNonceManager::new(store.clone(), self.rpc.clone()));
-        let submission = Arc::new(PublicMempool::new(self.rpc.clone()));
+        // Always a Router — its private arm is present only with a relay identity, and the
+        // Router rejects private sends without one, so the wallet holds no capability flag.
+        let public = Arc::new(PublicMempool::new(self.rpc.clone()));
+        let private: Option<Arc<dyn SubmissionStrategy>> = self.relay_identity.map(|id| {
+            Arc::new(PrivateMev::new(self.rpc.clone(), id)) as Arc<dyn SubmissionStrategy>
+        });
+        let submission: Arc<dyn SubmissionStrategy> = Arc::new(Router::new(public, private));
 
         let mut manager = TransactionManager::new(
             self.rpc.clone(),
@@ -337,6 +371,33 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), running.stop())
             .await
             .expect("loop did not stop within 2s");
+    }
+
+    #[tokio::test]
+    async fn private_send_without_relay_identity_is_rejected() {
+        // With no relay identity, a `Private` route must fail cleanly before signing —
+        // never fall through to the public mempool (a privacy leak in a release build).
+        use crate::core::deps::{Escalation, Protect, RouteError};
+        let wallet = Wallet::builder(
+            Arc::new(MockRpc::default()),
+            Arc::new(MockSigner::default()),
+            Arc::new(MockPolicy::default()),
+        )
+        .build();
+        let intent = TxIntent::transfer(
+            1,
+            Address::ZERO,
+            Address::ZERO,
+            alloy_primitives::U256::ZERO,
+        );
+        let err = wallet
+            .send_with(&intent, Protect::mev_blocker(Escalation::StayPrivate))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WalletKitError::Route(RouteError::RelayNotConfigured)
+        ));
     }
 
     #[tokio::test]

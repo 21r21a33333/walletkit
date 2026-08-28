@@ -12,9 +12,9 @@ pub use lifecycle::{ChainEvent, ChainView, Finality, FinalityConfig, Outcome, tr
 
 use super::{TransactionManager, signing};
 use crate::core::deps::{
-    Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
+    Clock, Escalation, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
     PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
-    SubmissionError, SubmissionStrategy,
+    SubmissionError, SubmissionRoute, SubmissionStrategy,
 };
 use crate::core::wallet::{Decision, HandleId, PolicyApproval, SigningRequest, TxHandle, TxStatus};
 use crate::obs::{debug, info, warn};
@@ -154,7 +154,12 @@ impl AccountExecutor {
     pub async fn recover(&self) -> Result<(), ExecutorError> {
         for handle in self.state_store.pending_handles(self.account).await? {
             if matches!(handle.status, TxStatus::Pending | TxStatus::Sent) {
-                let _ = self.submission.submit(handle.signed.clone()).await;
+                // Re-broadcast on the persisted route — a private tx must not leak to the
+                // public mempool after a restart.
+                let _ = self
+                    .submission
+                    .submit(handle.signed.clone(), &handle.submission)
+                    .await;
             }
         }
         Ok(())
@@ -347,7 +352,21 @@ impl AccountExecutor {
         let tx = signing::build_tx(&handle.intent, handle.nonce, current.gas_limit, bumped);
         let signed =
             signing::sign_encode(&*self.signer, tx, handle.intent_hash, &approval, now).await?;
-        match self.submission.submit(signed.rlp.clone()).await {
+
+        // Escalation is one-way and persisted below, so recovery re-broadcasts publicly
+        // rather than silently re-hiding a tx whose route gave up on staying private.
+        if let SubmissionRoute::Private(route) = &handle.submission.route
+            && let Escalation::PublicAfter { cycles } = route.escalation()
+            && handle.broadcasts.len() >= *cycles as usize
+        {
+            warn!(intent_hash = ?handle.intent_hash, cycles = *cycles, "escalating stuck private tx to public mempool");
+            handle.submission.route = SubmissionRoute::Public;
+        }
+        match self
+            .submission
+            .submit(signed.rlp.clone(), &handle.submission)
+            .await
+        {
             Ok(_) => {}
             // Already in the mempool (a prior round's replacement): record it, not an error.
             Err(e) if e.is_already_accepted() => {}
@@ -430,12 +449,71 @@ pub enum ExecutorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::deps::{Flashbots, Protect, SubmissionOpts};
     use crate::core::wallet::GasEnvelope;
     use crate::testutils::{
         Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, Submit,
         estimation, handle, receipt, receipt_unanchored, signed_legacy,
     };
     use alloy_primitives::{B256, Bytes};
+
+    // --- Private routing ---
+
+    fn private_bump_harness(submit: Arc<MockSubmit>, store: Arc<MockStore>) -> AccountExecutor {
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 4,
+                ..Default::default()
+            }))
+            .gas(Arc::new(MockGas {
+                bump: Some(estimation(200, 1)),
+                ..Default::default()
+            }))
+            .submit(submit)
+            .clock(Arc::new(MockClock(1000)))
+            .store(store)
+            .bump_timeout(0)
+            .executor()
+    }
+
+    #[tokio::test]
+    async fn bump_stays_on_the_private_route() {
+        // A `StayPrivate` tx that hasn't landed must re-broadcast privately — never leak
+        // to the public mempool — and its persisted route must be untouched.
+        let submit = Arc::new(MockSubmit::default());
+        let store = Arc::new(MockStore::default());
+        let exec = private_bump_harness(submit.clone(), store.clone());
+        let opts: SubmissionOpts = Protect::mev_blocker(Escalation::StayPrivate).into();
+        let mut h = handle(4, TxStatus::Sent);
+        h.submission = opts.clone();
+        store.put_handle(&h).await.unwrap();
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
+        );
+        exec.bump(&mut h, 1000).await.unwrap();
+        assert_eq!(*submit.routes.lock(), vec![opts.route.clone()]);
+        assert_eq!(store.all()[0].submission.route, opts.route);
+    }
+
+    #[tokio::test]
+    async fn bump_escalates_private_to_public_at_threshold() {
+        // `PublicAfter { cycles: 1 }` with one prior broadcast escalates on this bump: the
+        // send goes public and the route rewrite is persisted (so recovery won't re-hide it).
+        let submit = Arc::new(MockSubmit::default());
+        let store = Arc::new(MockStore::default());
+        let exec = private_bump_harness(submit.clone(), store.clone());
+        let mut h = handle(4, TxStatus::Sent); // broadcasts.len() == 1
+        h.submission = Flashbots::new(Escalation::PublicAfter { cycles: 1 }).into();
+        store.put_handle(&h).await.unwrap();
+        exec.track(
+            h.id,
+            PolicyApproval::mint(h.intent_hash, GasEnvelope::DEFAULT, u64::MAX),
+        );
+        exec.bump(&mut h, 1000).await.unwrap();
+        assert_eq!(*submit.routes.lock(), vec![SubmissionRoute::Public]);
+        assert_eq!(store.all()[0].submission.route, SubmissionRoute::Public);
+    }
 
     // --- Recover / confirm ---
 

@@ -27,4 +27,7 @@ pub use read::{AccountBalances, Erc20Metadata, ReadClient, ReadError, TokenBalan
 pub use rpc::{AccountActivity, Rpc, RpcError, Simulated};
 pub use signer::{Signer, SignerError};
 pub use state_store::{StateStore, StateStoreError, Versioned};
-pub use submission::{SubmissionError, SubmissionStrategy};
+pub use submission::{
+    Escalation, Flashbots, Hints, PrivateRoute, Protect, ProtectRelay, RouteError, SubmissionError,
+    SubmissionOpts, SubmissionRoute, SubmissionStrategy,
+};

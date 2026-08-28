@@ -2,7 +2,9 @@
 //! `eth_sendRawTransaction`. The seam lets private/relayer/paymaster strategies slot in
 //! without touching the pipeline.
 
-use crate::core::deps::{Rpc, SubmissionError, SubmissionStrategy};
+use crate::core::deps::{
+    Rpc, SubmissionError, SubmissionOpts, SubmissionRoute, SubmissionStrategy,
+};
 use crate::obs::debug;
 use alloy_primitives::{Bytes, TxHash};
 use async_trait::async_trait;
@@ -23,8 +25,16 @@ impl PublicMempool {
 
 #[async_trait]
 impl SubmissionStrategy for PublicMempool {
-    async fn submit(&self, signed_rlp: Bytes) -> Result<TxHash, SubmissionError> {
+    async fn submit(
+        &self,
+        signed_rlp: Bytes,
+        _opts: &SubmissionOpts,
+    ) -> Result<TxHash, SubmissionError> {
         debug!("broadcasting signed transaction");
         Ok(self.rpc.send_raw(signed_rlp).await?)
+    }
+
+    fn supports_route(&self, route: &SubmissionRoute) -> bool {
+        matches!(route, SubmissionRoute::Public)
     }
 }
