@@ -274,6 +274,8 @@ impl TransactionManager {
             // The cancel rides the same route as the tx it replaces (a private tx's cancel
             // stays private).
             submission: target.submission.clone(),
+            // A cancel is a plain self-send, never a gasless meta-tx.
+            meta: None,
         };
         self.state_store.put_handle(&cancel).await?;
         info!(nonce = target.nonce, "cancel submitted");
@@ -360,6 +362,8 @@ impl TransactionManager {
             last_broadcast_at: now,
             cancelled: false,
             submission: opts.clone(),
+            // Only the gasless path stamps this; a normal send is never a meta-tx.
+            meta: None,
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.

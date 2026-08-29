@@ -262,7 +262,7 @@ impl AccountExecutor {
         for hash in handle.broadcasts.iter().rev() {
             match self.rpc.receipt(*hash).await {
                 Ok(None) => continue, // this broadcast isn't mined; try an older one
-                Ok(Some(receipt)) => return self.anchor(receipt).await,
+                Ok(Some(receipt)) => return self.anchor(receipt, handle).await,
                 Err(_) => return ChainEvent::Unknown,
             }
         }
@@ -275,7 +275,7 @@ impl AccountExecutor {
     /// Trust a receipt only if its block is still canonical — `block_hash(n)` must equal
     /// the receipt's hash (geth serves receipts from stale forks after a reorg). A
     /// non-canonical block, a receipt with no block anchor, or a read error is `Unknown`.
-    async fn anchor(&self, receipt: TransactionReceipt) -> ChainEvent {
+    async fn anchor(&self, receipt: TransactionReceipt, handle: &TxHandle) -> ChainEvent {
         let (Some(block), Some(block_hash)) = (receipt.block_number, receipt.block_hash) else {
             return ChainEvent::Unknown;
         };
@@ -283,10 +283,7 @@ impl AccountExecutor {
             Ok(Some(canonical)) if canonical == block_hash => ChainEvent::Mined {
                 block,
                 block_hash,
-                outcome: match receipt.status() {
-                    true => Outcome::Executed,
-                    false => Outcome::Reverted,
-                },
+                outcome: outcome_of(&receipt, handle),
             },
             _ => ChainEvent::Unknown,
         }
@@ -418,6 +415,21 @@ impl AccountExecutor {
     }
 }
 
+/// The execution outcome for a mined receipt, honoring gasless confirm-safety: a meta-tx whose
+/// *outer* receipt succeeded still `Reverted`s unless the forwarder's `ExecutedForwardRequest`
+/// proves the *inner* call also ran — a mined `execute()` is not evidence the user's intent
+/// executed (H's no-false-`Confirmed` ethic, applied to meta-transactions).
+fn outcome_of(receipt: &TransactionReceipt, handle: &TxHandle) -> Outcome {
+    let inner_ok = match &handle.meta {
+        Some(meta) => meta.inner_succeeded(receipt.logs()),
+        None => true,
+    };
+    match receipt.status() && inner_ok {
+        true => Outcome::Executed,
+        false => Outcome::Reverted,
+    }
+}
+
 /// Operational failures the executor surfaces from the ports it drives. Its own type
 /// (not the pipeline's) — tracking and one-shot send are separate concerns.
 #[derive(Debug, thiserror::Error)]
@@ -450,12 +462,12 @@ pub enum ExecutorError {
 mod tests {
     use super::*;
     use crate::core::deps::{Flashbots, Protect, SubmissionOpts};
-    use crate::core::wallet::GasEnvelope;
+    use crate::core::wallet::{GasEnvelope, MetaContext};
     use crate::testutils::{
         Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, Submit,
         estimation, handle, receipt, receipt_unanchored, signed_legacy,
     };
-    use alloy_primitives::{B256, Bytes};
+    use alloy_primitives::{B256, Bytes, U256};
 
     // --- Private routing ---
 
@@ -670,6 +682,30 @@ mod tests {
         let h = B256::repeat_byte(1);
         run_confirm(&store, 5, 10, Some(receipt(false, 8, h)), Some(h), 2).await;
         assert!(matches!(store.all()[0].status, TxStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn gasless_outer_success_does_not_confirm_a_reverted_inner_call() {
+        // The J invariant at the shell: a mined outer `execute()` (receipt status = 1) is *not*
+        // evidence the user's inner call ran. Without a matching `ExecutedForwardRequest`, a
+        // meta-tx outcome is `Reverted` (→ `Failed` at the FSM), never `Executed`.
+        let mined_ok = receipt(true, 8, B256::ZERO); // outer tx OK, no forwarder event
+        let plain = handle(4, TxStatus::Sent);
+        assert_eq!(outcome_of(&mined_ok, &plain), Outcome::Executed);
+
+        let mut meta = handle(4, TxStatus::Sent);
+        meta.meta = Some(MetaContext {
+            forwarder: Address::ZERO,
+            signer: Address::ZERO,
+            nonce: U256::ZERO,
+        });
+        assert_eq!(outcome_of(&mined_ok, &meta), Outcome::Reverted);
+
+        // A reverted outer tx is `Reverted` regardless of `meta`.
+        assert_eq!(
+            outcome_of(&receipt(false, 8, B256::ZERO), &plain),
+            Outcome::Reverted
+        );
     }
 
     #[tokio::test]

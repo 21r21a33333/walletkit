@@ -77,6 +77,7 @@ pub(crate) fn handle(nonce: u64, status: TxStatus) -> TxHandle {
         last_broadcast_at: 0,
         cancelled: false,
         submission: SubmissionOpts::default(),
+        meta: None,
     }
 }
 

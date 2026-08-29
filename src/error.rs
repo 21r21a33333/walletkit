@@ -4,8 +4,8 @@
 
 use crate::core::accounts::AccountError;
 use crate::core::deps::{
-    EnsError, GasOracleError, NonceManagerError, PolicyEngineError, ReadError, RouteError,
-    RpcError, SignerError, StateStoreError, SubmissionError,
+    EnsError, GasOracleError, NonceManagerError, PolicyEngineError, ReadError, RelayError,
+    RouteError, RpcError, SignerError, StateStoreError, SubmissionError,
 };
 use crate::core::wallet::{ExecutorError, PolicyRejection, TransactionManagerError};
 use alloy_primitives::Address;
@@ -88,6 +88,10 @@ pub enum WalletKitError {
     /// generic Protect relay).
     #[error(transparent)]
     Route(RouteError),
+    /// A gasless meta-transaction relay operation failed (forwarder read, request signing,
+    /// self-relay broadcast, or a managed relay declining the request).
+    #[error(transparent)]
+    Relay(RelayError),
 }
 
 impl WalletKitError {
@@ -108,6 +112,7 @@ impl WalletKitError {
                 ErrorKind::Terminal
             }
             Self::Account(e) => account_kind(e),
+            Self::Relay(e) => relay_kind(e),
             Self::Signer(_)
             | Self::Policy(_)
             | Self::PolicyEngine(_)
@@ -151,6 +156,9 @@ impl WalletKitError {
             Self::Cancel { .. } => {
                 Some("the transaction already settled or was never tracked — nothing to cancel")
             }
+            Self::Relay(RelayError::Forwarder { .. }) => Some(
+                "check the forwarder address and that the target contract trusts it (ERC-2771)",
+            ),
             _ => None,
         }
     }
@@ -182,6 +190,17 @@ fn submission_kind(e: &SubmissionError) -> ErrorKind {
         ErrorKind::Retryable
     } else {
         ErrorKind::Terminal
+    }
+}
+
+fn relay_kind(e: &RelayError) -> ErrorKind {
+    // Delegate to the inner classifiers; a config/decline error is terminal.
+    match e {
+        RelayError::Rpc(e) => rpc_kind(e),
+        RelayError::Submission(e) => submission_kind(e),
+        RelayError::Signing(_) | RelayError::Rejected { .. } | RelayError::Forwarder { .. } => {
+            ErrorKind::Terminal
+        }
     }
 }
 
@@ -265,6 +284,12 @@ impl From<AccountError> for WalletKitError {
     }
 }
 
+impl From<RelayError> for WalletKitError {
+    fn from(e: RelayError) -> Self {
+        Self::Relay(e)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +364,25 @@ mod tests {
             .kind(),
             ErrorKind::Retryable
         );
+    }
+
+    #[test]
+    fn relay_errors_classify_by_cause_and_hint_on_config() {
+        // Inherits the inner transport class (delegates to rpc_kind)...
+        assert_eq!(
+            WalletKitError::Relay(RelayError::Rpc(RpcError::Call {
+                message: "timeout".into(),
+                transient: true,
+            }))
+            .kind(),
+            ErrorKind::Retryable
+        );
+        // ...while a forwarder-config error is terminal with an actionable hint.
+        let e = WalletKitError::Relay(RelayError::Forwarder {
+            message: "target does not trust the forwarder".into(),
+        });
+        assert_eq!(e.kind(), ErrorKind::Terminal);
+        assert!(e.remediation().is_some());
     }
 
     #[test]
