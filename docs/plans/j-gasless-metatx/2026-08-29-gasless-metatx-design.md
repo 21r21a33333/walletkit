@@ -15,6 +15,33 @@ pays* for it, via ERC-2771 meta-transactions). **Date:** 2026-08-29. **Status:**
 > **configurable policy (default `AllowAll`)** — the user's request is already policy-gated on
 > its own signing path. See §2, §6, §7, §11, and the research note at the end.
 
+> **Revision 2026-08-30b (Phase-3 kickoff, research-backed).** Two corrections after building
+> Phases 1–2 and researching Gelato's live API; they supersede the stale parts of §4/§6.
+>
+> 1. **Self-relay landed as facade orchestration, not a `SelfRelay` *adapter* (option b).** §6's
+>    "`SelfRelay` adapter" is superseded: the facade drives the relayer's `TransactionManager`
+>    directly, because the outer send's failure surface is the full pipeline's
+>    `TransactionManagerError`, which `RelayError` cannot hold. There is **no
+>    `adapters/relay/self_relay.rs`**; the `Relay` port + `RelayStatus` stay unused until Gelato
+>    (Phase 3) gives them their first consumer.
+> 2. **Gelato signs its *own* request, not the OZ `ForwardRequest`.** Gelato relays through its
+>    own `GelatoRelay*ERC2771` forwarder, so the user signs a **distinct** EIP-712 struct —
+>    `{ uint256 chainId; address target; bytes data; address user; uint256 userNonce; uint256
+>    userDeadline }` (no `value`/`gas`; `chainId` is *inside* the struct) — bound to **Gelato's**
+>    domain (name/version/`verifyingContract` from `@gelatonetwork/relay-sdk`, pinned at
+>    implementation and confirmed by the live test). Our OZ `ForwardRequest`/`ForwarderDomain`/
+>    `nonces` helpers are **self-relay-only**; the Gelato adapter carries its own `sol!` request
+>    type, domain, and `userNonce` read. Fee models: `Sponsored` (1Balance, `sponsorApiKey`) /
+>    `SyncFee` (`feeToken`). Nonce modes: `Sequential` (`userNonce`) / `Concurrent` (`userSalt`).
+>    Wire: POST the relay endpoint → `{ taskId }`; poll `GET api.gelato.digital/tasks/status/
+>    {taskId}` → `taskState` (`CheckPending`/`ExecPending`/`WaitingForConfirmation`/`ExecSuccess`/
+>    `ExecReverted`/`Cancelled`/`Blacklisted`/`NotFound`) + `transactionHash`.
+> 3. **Testability (decision 2026-08-30):** Gelato is hosted SaaS — no hermetic anvil-equivalent,
+>    so unlike slice B we cannot prove the wire format on a local chain. The adapter is unit-tested
+>    against a **stubbed HTTP transport** (parsing/wiring) plus an **env-gated live test**
+>    (`GELATO_API_KEY` + a testnet). Per the approved direction, **the PR is held until the live
+>    test passes** — the managed-relay analog of slice B's real-chain proof.
+
 ## 1. Goal & scope
 
 Let a user execute an action **without holding ETH**: the user signs an EIP-712

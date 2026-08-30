@@ -28,6 +28,18 @@ review — the same cadence as I. Hard dependency chain: 1 (build+sign+honest-co
 > `AllowAll`)**. Phase 2's steps below reflect this; the old "add `relayer: Arc<dyn Signer>`,
 > pick by `meta.is_some()`" seam is dropped. Phases 1 and 3 are unchanged in shape.
 
+> **Revision 2026-08-30b — Phase 3 corrected after researching Gelato's live API (design
+> Revision 2026-08-30b).** Two fixes to Phase-3 Step 1 below: (a) **Gelato signs its own EIP-712
+> request** — a distinct `sol!` struct `{ chainId, target, data, user, userNonce, userDeadline }`
+> bound to **Gelato's** `GelatoRelay*ERC2771` domain (name/version/`verifyingContract` from
+> `@gelatonetwork/relay-sdk`, pinned at impl + confirmed by the live test) — **not** the OZ
+> `ForwardRequest`/`nonces` helpers, which are self-relay-only; the Gelato adapter carries its own
+> request type + `userNonce` read. (b) There is **no `adapters/relay/self_relay.rs`** (self-relay
+> is facade-orchestrated, Phase 2 slice A); Phase 3 adds only `adapters/relay/{mod,gelato}.rs`,
+> which give the `Relay` port + `RelayStatus` their first consumer. **Test/PR gate:** Gelato is
+> hosted SaaS (no hermetic harness) → stubbed-transport unit tests **plus an env-gated live test**
+> (`GELATO_API_KEY` + testnet); **hold the PR until the live test passes** (approved 2026-08-30).
+
 ## Global constraints
 
 - **Minimal-LOC / reuse-first (the user's explicit ask):** every step names the library
