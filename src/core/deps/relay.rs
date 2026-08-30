@@ -27,6 +27,24 @@ pub struct SignedRequest {
     pub chain_id: u64,
 }
 
+impl SignedRequest {
+    /// Assemble a signed request from its parts — built by the wallet after the policy gate has
+    /// authorized and the user has signed the [`ForwardRequest`].
+    pub(crate) fn new(
+        request: ForwardRequest,
+        signature: SignatureEnvelope,
+        forwarder: Address,
+        chain_id: u64,
+    ) -> Self {
+        Self {
+            request,
+            signature,
+            forwarder,
+            chain_id,
+        }
+    }
+}
+
 /// Gets a policy-approved, user-signed [`ForwardRequest`] included on-chain by a gas-paying
 /// third party. [`SelfRelay`] submits an outer `execute()` tx we track directly; a managed
 /// relay queues a task we [`poll`](Relay::poll). Either way the return is a [`TxHandle`].
@@ -254,6 +272,10 @@ pub enum RelayError {
         /// What went wrong (never secret-bearing).
         message: String,
     },
+    /// A gasless send was attempted with no relayer + forwarder configured. Terminal — set them
+    /// on the builder (`relayer`/`forwarder`) before `send_gasless`.
+    #[error("gasless relay is not configured: set a relayer signer and a forwarder address")]
+    NotConfigured,
 }
 
 #[cfg(test)]

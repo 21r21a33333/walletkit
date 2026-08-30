@@ -6,4 +6,5 @@ mod forward_request;
 mod meta_context;
 
 pub use forward_request::{ForwardRequest, ForwarderDomain};
+pub(crate) use forward_request::{decode_forwarder_nonce, execute_calldata, nonces_calldata};
 pub use meta_context::MetaContext;

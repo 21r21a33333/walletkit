@@ -24,6 +24,16 @@ pub struct MetaContext {
 }
 
 impl MetaContext {
+    /// The confirm-safety context for a signed request: which forwarder emitted the event, and
+    /// the `signer`/`nonce` that identify this request's `ExecutedForwardRequest`.
+    pub(crate) fn for_request(signed: &crate::core::deps::SignedRequest) -> Self {
+        Self {
+            forwarder: signed.forwarder,
+            signer: signed.request.from,
+            nonce: signed.request.nonce,
+        }
+    }
+
     /// Whether the forwarder actually executed the user's inner call. Decodes the
     /// `ExecutedForwardRequest` matching this request's `signer`+`nonce` and returns its
     /// `success`; a missing event counts as failure. **A succeeding outer tx is not enough** —

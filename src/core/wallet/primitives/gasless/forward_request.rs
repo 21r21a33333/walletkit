@@ -4,8 +4,8 @@
 //! [`TypedData`] through alloy's encoder — nothing EIP-712 is hand-rolled.
 
 use alloy_dyn_abi::TypedData;
-use alloy_primitives::{Address, U256};
-use alloy_sol_types::{Eip712Domain, sol};
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_sol_types::{Eip712Domain, SolCall, sol};
 use std::borrow::Cow;
 
 sol! {
@@ -22,10 +22,62 @@ sol! {
         bytes data;
     }
 
+    // The on-chain calldata form: drops the signed `nonce` (the forwarder reads it from its own
+    // mapping) and carries the user's `signature`. Field order matches OZ `ERC2771Forwarder` v5.x.
+    struct ForwardRequestData {
+        address from;
+        address to;
+        uint256 value;
+        uint256 gas;
+        uint48 deadline;
+        bytes data;
+        bytes signature;
+    }
+
+    function execute(ForwardRequestData request) external payable;
+    function nonces(address owner) external view returns (uint256);
+
     // Emitted by `execute()` once per request. `success = false` means the forwarder verified
     // and ran but the *inner* call reverted (the nonce is still consumed) — the confirm-safety
     // signal a mined outer tx cannot convey on its own.
     event ExecutedForwardRequest(address indexed signer, uint256 nonce, bool success);
+}
+
+impl ForwardRequest {
+    /// The on-chain calldata form of this request, carrying the user's `signature`; drops the
+    /// signed `nonce` (the forwarder reads it from its own mapping).
+    fn to_data(&self, signature: Bytes) -> ForwardRequestData {
+        ForwardRequestData {
+            from: self.from,
+            to: self.to,
+            value: self.value,
+            gas: self.gas,
+            deadline: self.deadline,
+            data: self.data.clone(),
+            signature,
+        }
+    }
+}
+
+/// ABI calldata for the forwarder's `execute(ForwardRequestData)`, carrying the user's
+/// `signature` — what a self-relayer submits as the outer tx.
+pub(crate) fn execute_calldata(request: &ForwardRequest, signature: Bytes) -> Bytes {
+    executeCall {
+        request: request.to_data(signature),
+    }
+    .abi_encode()
+    .into()
+}
+
+/// ABI calldata for the forwarder's `nonces(owner)` read (sequential replay protection).
+pub(crate) fn nonces_calldata(owner: Address) -> Bytes {
+    noncesCall { owner }.abi_encode().into()
+}
+
+/// Decode a `nonces()` return — a single ABI-encoded `uint256` word. `None` if the return is
+/// too short to be a word (a non-conforming forwarder).
+pub(crate) fn decode_forwarder_nonce(ret: &[u8]) -> Option<U256> {
+    (ret.len() >= 32).then(|| U256::from_be_slice(&ret[..32]))
 }
 
 /// The EIP-712 domain identity of a forwarder contract. Chain id and address are per-send, so

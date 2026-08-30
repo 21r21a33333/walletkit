@@ -159,6 +159,9 @@ impl WalletKitError {
             Self::Relay(RelayError::Forwarder { .. }) => Some(
                 "check the forwarder address and that the target contract trusts it (ERC-2771)",
             ),
+            Self::Relay(RelayError::NotConfigured) => Some(
+                "set a relayer signer and forwarder via WalletBuilder::relayer(..).forwarder(..)",
+            ),
             _ => None,
         }
     }
@@ -198,9 +201,10 @@ fn relay_kind(e: &RelayError) -> ErrorKind {
     match e {
         RelayError::Rpc(e) => rpc_kind(e),
         RelayError::Submission(e) => submission_kind(e),
-        RelayError::Signing(_) | RelayError::Rejected { .. } | RelayError::Forwarder { .. } => {
-            ErrorKind::Terminal
-        }
+        RelayError::Signing(_)
+        | RelayError::Rejected { .. }
+        | RelayError::Forwarder { .. }
+        | RelayError::NotConfigured => ErrorKind::Terminal,
     }
 }
 

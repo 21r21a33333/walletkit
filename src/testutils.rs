@@ -47,6 +47,12 @@ pub(crate) fn estimation(max_fee: u128, max_priority: u128) -> Eip1559Estimation
     }
 }
 
+/// A single ABI word (32-byte big-endian) encoding `v` — stubs a `uint256` return such as a
+/// forwarder `nonces()` read.
+pub(crate) fn u256_word(v: u64) -> Bytes {
+    Bytes::from(U256::from(v).to_be_bytes::<32>().to_vec())
+}
+
 /// A minimal value-transfer intent from the zero account; tests tweak fields as needed.
 pub(crate) fn intent() -> TxIntent {
     TxIntent {
@@ -396,6 +402,11 @@ pub(crate) struct MockRpc {
     pub receipt_err: bool,
     pub canonical: Option<B256>,
     pub gas_reverts: bool,
+    /// Stubbed `eth_call` return data (e.g. an ABI word for a `nonces()` read). `None` returns
+    /// empty. Ignored when `call_reverts` is set.
+    pub call_returns: Option<Bytes>,
+    /// When set, `call()` returns a revert instead of data — for the forwarder-read reject path.
+    pub call_reverts: bool,
     pub log: CallLog,
 }
 
@@ -439,7 +450,13 @@ impl Rpc for MockRpc {
         }
     }
     async fn call(&self, _: &TransactionRequest) -> Result<Simulated, RpcError> {
-        Ok(Simulated::Returned(Bytes::new()))
+        if self.call_reverts {
+            Ok(Simulated::Reverted(Bytes::new()))
+        } else {
+            Ok(Simulated::Returned(
+                self.call_returns.clone().unwrap_or_default(),
+            ))
+        }
     }
     async fn create_access_list(
         &self,
