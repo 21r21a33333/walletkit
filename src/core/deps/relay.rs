@@ -1,15 +1,17 @@
 //! [`Relay`] — the gasless meta-transaction inclusion port, and [`GaslessOpts`], the per-send
 //! choice of *who pays the gas*. A user-signed [`ForwardRequest`] is handed to a relay that
-//! submits it and pays; the return is a [`TxHandle`] so tracking is uniform across families.
+//! submits it and pays; the return is a [`TxHandle`](crate::core::wallet::TxHandle) so tracking
+//! is uniform across families.
 //!
 //! The two families are type-state, mirroring [`submission`](super::submission): the managed
 //! [`Gelato`] knobs (`FeeScheme`, `NonceScheme`) live only on `Gelato`, so a [`SelfRelay`] can't
 //! carry them — an invalid combination is unrepresentable, not validated at runtime.
 
 use crate::core::deps::{RpcError, SignerError, SubmissionError, SubmissionOpts};
-use crate::core::wallet::{ForwardRequest, SignatureEnvelope, TxHandle};
+use crate::core::wallet::{ForwardRequest, SignatureEnvelope};
 use alloy_primitives::{Address, TxHash};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
 
@@ -45,33 +47,52 @@ impl SignedRequest {
     }
 }
 
-/// Gets a policy-approved, user-signed [`ForwardRequest`] included on-chain by a gas-paying
-/// third party. [`SelfRelay`] submits an outer `execute()` tx we track directly; a managed
-/// relay queues a task we [`poll`](Relay::poll). Either way the return is a [`TxHandle`].
-#[async_trait]
-pub trait Relay: Send + Sync {
-    /// Relay `signed`; return a persisted [`TxHandle`] tracking inclusion.
-    async fn relay(&self, signed: &SignedRequest) -> Result<TxHandle, RelayError>;
+/// A managed relay's opaque task identifier. The relay returns one when it accepts a submission;
+/// we echo it back to the status endpoint until the task reaches an on-chain hash. Never
+/// interpreted here — an implementation detail of the relay (Gelato's `taskId` is a UUID).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskId(String);
 
-    /// Advance a task-backed handle. The default is [`RelayStatus::Settled`] — a synchronous
-    /// relay already returned an on-chain hash; a managed relay overrides to poll its task API.
-    async fn poll(&self, _handle: &TxHandle) -> Result<RelayStatus, RelayError> {
-        Ok(RelayStatus::Settled)
+impl TaskId {
+    /// Wrap a relay-issued task id.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The raw id, for building the status-poll URL.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-/// Where a relayed request stands. [`Included`](RelayStatus::Included) hands off to the
+impl fmt::Display for TaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A managed relay (e.g. Gelato) that has accepted a submission asynchronously: the tracking
+/// executor [`poll`](Relay::poll)s the returned [`TaskId`] until the relay reports an on-chain
+/// hash, at which point the normal chain-confirm path takes over. Self-relay does **not** use
+/// this port — it submits an outer tx through the standard pipeline and is tracked directly.
+#[async_trait]
+pub trait Relay: Send + Sync {
+    /// Poll a submitted task. [`Included`](RelayStatus::Included) yields the on-chain hash (the
+    /// executor then confirms it at depth); [`Pending`](RelayStatus::Pending) is still queued;
+    /// [`Failed`](RelayStatus::Failed) is terminal at the relay (cancelled / reverted).
+    async fn poll(&self, task: &TaskId) -> Result<RelayStatus, RelayError>;
+}
+
+/// Where a polled relay task stands. [`Included`](RelayStatus::Included) hands off to the
 /// on-chain confirm path; [`Failed`](RelayStatus::Failed) is terminal at the relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RelayStatus {
-    /// Nothing to poll — the relay already produced an on-chain tx (self-relay).
-    Settled,
-    /// The managed relay has accepted the task but it is not yet included.
+    /// The relay has accepted the task but it is not yet included on-chain.
     Pending,
-    /// The request is on-chain as this tx; chain-confirm (and the meta-tx event decode) settle it.
+    /// The request is on-chain as this tx; chain-confirm (and the meta-tx safety decode) settle it.
     Included(TxHash),
-    /// The relay dropped the request (cancelled / reverted before inclusion).
+    /// The relay dropped the request (cancelled / reverted before inclusion). Carries the reason.
     Failed(String),
 }
 
@@ -91,8 +112,10 @@ pub struct GaslessOpts {
 pub enum GaslessRoute {
     /// Our own funded relayer submits `execute()` through the standard pipeline.
     SelfRelay(SelfRelay),
-    /// A managed Gelato relay submits and pays.
-    Gelato(Gelato),
+    /// The wallet's registered managed Gelato relay submits and pays. The sponsor key and
+    /// fee/nonce scheme are configured once at build time ([`WalletBuilder::gelato`](crate::WalletBuilder::gelato)); this
+    /// per-send variant only selects that backend, so no secret rides on a send call.
+    Gelato,
 }
 
 /// Self-relay: a funded relayer key submits the outer `execute()` tx. `submission` is the
@@ -118,13 +141,15 @@ impl SelfRelay {
     }
 }
 
-/// A managed Gelato relay. Secret-bearing (the sponsor api key), so it has a **redacting
-/// `Debug`** and is never serialized.
+/// A managed Gelato relay's configuration, registered once on the wallet
+/// ([`WalletBuilder::gelato`](crate::WalletBuilder::gelato)). Secret-bearing (the sponsor api key), so it has a **redacting
+/// `Debug`** and is never serialized. A per-send [`GaslessOpts::gelato`] only *selects* this
+/// backend — the key never travels on a send call.
 #[derive(Clone)]
 pub struct Gelato {
     /// Who ultimately pays the fee.
     pub fee: FeeScheme,
-    /// The forwarder replay-protection strategy.
+    /// The forwarder replay-protection strategy applied to sends through this relay.
     pub nonce: NonceScheme,
 }
 
@@ -198,15 +223,18 @@ impl Default for Deadline {
     }
 }
 
-impl From<SelfRelay> for GaslessOpts {
-    fn from(relay: SelfRelay) -> Self {
-        GaslessRoute::SelfRelay(relay).into()
+impl GaslessOpts {
+    /// Route this send through the wallet's registered Gelato relay ([`WalletBuilder::gelato`](crate::WalletBuilder::gelato)),
+    /// with the default request-validity window. The sponsor key/scheme live on the wallet, so
+    /// selecting Gelato per send carries no secret.
+    pub fn gelato() -> Self {
+        GaslessRoute::Gelato.into()
     }
 }
 
-impl From<Gelato> for GaslessOpts {
-    fn from(relay: Gelato) -> Self {
-        GaslessRoute::Gelato(relay).into()
+impl From<SelfRelay> for GaslessOpts {
+    fn from(relay: SelfRelay) -> Self {
+        GaslessRoute::SelfRelay(relay).into()
     }
 }
 

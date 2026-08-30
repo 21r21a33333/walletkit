@@ -10,9 +10,9 @@ use crate::core::deps::{
     Simulated, StateStore, StateStoreError, SubmissionError, SubmissionOpts, SubmissionStrategy,
 };
 use crate::core::wallet::{
-    Decision, ForwardRequest, ForwarderDomain, HandleId, IntentHash, MetaContext, PolicyApproval,
-    PolicyRejection, SignatureEnvelope, SigningRequest, TxHandle, TxIntent, TxStatus,
-    decode_forwarder_nonce, nonces_calldata,
+    Decision, ForwardRequest, ForwarderDomain, GasEnvelope, HandleId, IntentHash, MetaContext,
+    PolicyApproval, PolicyRejection, SignatureEnvelope, SigningRequest, TxHandle, TxIntent,
+    TxStatus, decode_forwarder_nonce, nonces_calldata,
 };
 use crate::error::WalletKitError;
 use crate::obs::{debug, error, info, warn};
@@ -229,6 +229,42 @@ impl TransactionManager {
     /// The account this manager signs transactions for (its signer's address).
     pub(crate) fn account(&self) -> Address {
         self.signer.address()
+    }
+
+    /// Current wall-clock (unix seconds) from the injected clock — for building a request's
+    /// absolute deadline at send time.
+    pub(crate) fn now_unix(&self) -> u64 {
+        self.clock.now_unix()
+    }
+
+    /// Persist a task-pending handle for a managed-relay (Gelato) send under the **user** account.
+    /// The relay submits and pays, so this handle carries no signed bytes and no on-chain hash
+    /// yet — the user's executor polls `meta.task` to inclusion, then confirms it at depth. The
+    /// `envelope` is the default ceiling (never bumped: we do not resubmit a relay-owned tx).
+    pub(crate) async fn persist_task_handle(
+        &self,
+        intent: &TxIntent,
+        meta: MetaContext,
+    ) -> Result<TxHandle, TransactionManagerError> {
+        let intent_hash = intent.hash();
+        let nonce = meta.nonce.saturating_to::<u64>();
+        let handle = TxHandle {
+            id: HandleId::new(intent_hash, nonce),
+            account: intent.account,
+            intent: intent.clone(),
+            intent_hash,
+            nonce,
+            status: TxStatus::Sent,
+            envelope: GasEnvelope::DEFAULT,
+            signed: Bytes::new(),
+            broadcasts: vec![],
+            last_broadcast_at: self.clock.now_unix(),
+            cancelled: false,
+            submission: SubmissionOpts::default(),
+            meta: Some(meta),
+        };
+        self.state_store.put_handle(&handle).await?;
+        Ok(handle)
     }
 
     /// Read the forwarder's current nonce for `owner` (sequential replay protection). A revert

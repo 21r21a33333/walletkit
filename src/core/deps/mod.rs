@@ -27,7 +27,7 @@ pub use pricing::{Currency, Price, PriceSource, PricingError, TokenMetadataSourc
 pub use read::{AccountBalances, Erc20Metadata, ReadClient, ReadError, TokenBalance};
 pub use relay::{
     Deadline, FeeScheme, GaslessOpts, GaslessRoute, Gelato, NonceScheme, Relay, RelayError,
-    RelayStatus, SelfRelay, SignedRequest,
+    RelayStatus, SelfRelay, SignedRequest, TaskId,
 };
 pub use rpc::{AccountActivity, Rpc, RpcError, Simulated};
 pub use signer::{Signer, SignerError};

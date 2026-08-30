@@ -13,8 +13,8 @@ pub use lifecycle::{ChainEvent, ChainView, Finality, FinalityConfig, Outcome, tr
 use super::{TransactionManager, signing};
 use crate::core::deps::{
     Clock, Escalation, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
-    PolicyEngineError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
-    SubmissionError, SubmissionRoute, SubmissionStrategy,
+    PolicyEngineError, Relay, RelayStatus, Rpc, RpcError, Signer, SignerError, StateStore,
+    StateStoreError, SubmissionError, SubmissionRoute, SubmissionStrategy,
 };
 use crate::core::wallet::{Decision, HandleId, PolicyApproval, SigningRequest, TxHandle, TxStatus};
 use crate::obs::{debug, info, warn};
@@ -61,6 +61,9 @@ pub struct AccountExecutor {
     /// When set, a foreign `Replaced` re-executes the intent through this send pipeline at a
     /// fresh nonce (opt-in intent-refill). `None` disables it.
     refill: Option<Arc<TransactionManager>>,
+    /// When set, task-backed handles (a managed Gelato relay: `meta.task = Some`, no tx hash yet)
+    /// are polled to inclusion via this port. `None` when no managed relay is configured.
+    relay: Option<Arc<dyn Relay>>,
     /// Lossy cache of the one thing a handle can't persist — the bump approval
     /// capability. A cache miss just means "re-evaluate policy on the next bump", so
     /// every persisted handle is bump-eligible with or without an entry here.
@@ -104,6 +107,7 @@ impl AccountExecutor {
             required_confirmations: DEFAULT_REQUIRED_CONFIRMATIONS,
             bump_timeout: DEFAULT_BUMP_TIMEOUT_SECS,
             refill: None,
+            relay: None,
             approvals: Mutex::new(HashMap::new()),
             last_latest: AtomicU64::new(0),
         }
@@ -125,6 +129,13 @@ impl AccountExecutor {
     /// send pipeline. Off unless set.
     pub fn with_refill(mut self, manager: Arc<TransactionManager>) -> Self {
         self.refill = Some(manager);
+        self
+    }
+
+    /// Enable managed-relay polling: task-backed handles (Gelato) are advanced to inclusion via
+    /// `relay`. Off unless set — a wallet with no managed relay never polls.
+    pub fn with_relay(mut self, relay: Arc<dyn Relay>) -> Self {
+        self.relay = Some(relay);
         self
     }
 
@@ -153,7 +164,11 @@ impl AccountExecutor {
     /// are Confirm's job (rebroadcasting them only earns a nonce-too-low).
     pub async fn recover(&self) -> Result<(), ExecutorError> {
         for handle in self.state_store.pending_handles(self.account).await? {
-            if matches!(handle.status, TxStatus::Pending | TxStatus::Sent) {
+            // A managed-relay (Gelato) handle carries no signed bytes — the relay submits it, so
+            // there is nothing for us to rebroadcast; the confirm poll advances it instead.
+            if matches!(handle.status, TxStatus::Pending | TxStatus::Sent)
+                && !handle.signed.is_empty()
+            {
                 // Re-broadcast on the persisted route — a private tx must not leak to the
                 // public mempool after a restart.
                 let _ = self
@@ -165,52 +180,101 @@ impl AccountExecutor {
         Ok(())
     }
 
-    /// Advance in-flight handles against one consistent chain view: reconcile the nonce
-    /// forward, then move each handle by the pure [`transition`]. Every unreliable read
-    /// collapses to [`ChainEvent::Unknown`] (per handle) or a skipped cycle (bad view),
-    /// so a wrong read can neither advance nor rewind the lifecycle.
+    /// Advance in-flight handles against one consistent chain view: reconcile the nonce forward,
+    /// then advance each handle. Every unreliable read collapses to [`ChainEvent::Unknown`] (per
+    /// handle) or a skipped cycle (bad view), so a wrong read can neither advance nor rewind the
+    /// lifecycle.
     pub async fn confirm(&self) -> Result<(), ExecutorError> {
         let Some(cycle) = self.read_cycle().await? else {
             return Ok(()); // stale/inconsistent head — skip the whole cycle
         };
-        // Reconcile the allocator forward — a foreign/out-of-band tx can advance the
-        // chain nonce without our allocation.
+        // Reconcile the allocator forward — a foreign/out-of-band tx can advance the chain nonce
+        // without our allocation.
         self.nonce_manager
             .reset(self.account, cycle.mined_nonce)
             .await?;
         for mut handle in self.state_store.pending_handles(self.account).await? {
-            let event = self.event_for(&handle, cycle.mined_nonce).await;
-            let Some(next) = transition(&handle.status, &event, &cycle.view, &cycle.finality)
-            else {
-                continue;
-            };
-            let next = match next {
-                TxStatus::Replaced if handle.cancelled => TxStatus::Dropped,
-                other => other,
-            };
-            // `_prev` is read only by the transition events below; the underscore keeps a
-            // `--no-default-features` build (where the obs macros are no-ops) warning-free.
-            let _prev = std::mem::replace(&mut handle.status, next);
-            if handle.status.is_terminal() {
-                info!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "transaction settled");
-            } else {
-                debug!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "status advanced");
-            }
-            // Refill is gated on the persist succeeding: a terminal handle that failed to
-            // persist stays in `pending_handles` and re-transitions next tick, so firing
-            // refill here would double-spawn the intent.
-            if self.state_store.put_handle(&handle).await.is_ok() && handle.status.is_terminal() {
-                self.approvals.lock().remove(&handle.id);
-                // A foreign replacement (never a cancel — that settled Dropped above)
-                // re-executes the intent when refill is on.
-                if let Some(manager) = &self.refill
-                    && handle.status == TxStatus::Replaced
-                {
-                    self.refill_intent(manager, &handle).await;
-                }
-            }
+            self.advance_handle(&mut handle, &cycle).await;
         }
         Ok(())
+    }
+
+    /// Advance one in-flight handle by whichever tracking applies: a managed-relay handle with no
+    /// on-chain hash yet is polled to inclusion; every other handle moves by the pure chain
+    /// [`transition`] — and once a polled handle records its hash it follows that same path.
+    async fn advance_handle(&self, handle: &mut TxHandle, cycle: &Cycle) {
+        if is_awaiting_relay(handle) {
+            self.poll_task(handle).await;
+        } else {
+            self.advance_on_chain(handle, cycle).await;
+        }
+    }
+
+    /// Move a chain-tracked handle by the pure [`transition`] against `cycle`, then persist it and
+    /// run any terminal bookkeeping. A `None` transition (no fresh evidence) leaves it untouched.
+    async fn advance_on_chain(&self, handle: &mut TxHandle, cycle: &Cycle) {
+        let event = self.event_for(handle, cycle.mined_nonce).await;
+        let Some(next) = transition(&handle.status, &event, &cycle.view, &cycle.finality) else {
+            return;
+        };
+        // A cancel whose nonce a foreign tx consumed settles `Dropped`, not `Replaced`.
+        let next = match next {
+            TxStatus::Replaced if handle.cancelled => TxStatus::Dropped,
+            other => other,
+        };
+        let prev = std::mem::replace(&mut handle.status, next);
+        log_transition(handle, &prev);
+        // Gate settle-bookkeeping on the persist: a terminal handle that failed to persist stays in
+        // `pending_handles` and re-transitions next tick, so acting here would double-spawn refill.
+        if self.state_store.put_handle(handle).await.is_ok() && handle.status.is_terminal() {
+            self.on_settled(handle).await;
+        }
+    }
+
+    /// Advance a managed-relay (Gelato) handle by polling its task. Inclusion records the on-chain
+    /// hash and drops back to `Sent`, handing off to the chain-confirm path so it anchors at depth
+    /// (the relay's `ExecSuccess` verdict is the honest inclusion signal — see [`outcome_of`]); a
+    /// relay `Failed` is terminal; a poll error or still-`Pending` task waits for a later tick.
+    /// Never a false `Confirmed`: only a genuinely-included, depth-confirmed tx settles.
+    async fn poll_task(&self, handle: &mut TxHandle) {
+        let (Some(relay), Some(task)) = (
+            &self.relay,
+            handle.meta.as_ref().and_then(|meta| meta.task.as_ref()),
+        ) else {
+            return; // no relay wired, or not a task handle — nothing to poll
+        };
+        match relay.poll(task).await {
+            Ok(RelayStatus::Included(hash)) => {
+                handle.broadcasts.push(hash);
+                handle.status = TxStatus::Sent;
+                if self.state_store.put_handle(handle).await.is_ok() {
+                    info!(intent_hash = ?handle.intent_hash, "relay task included on-chain");
+                }
+            }
+            Ok(RelayStatus::Failed(reason)) => {
+                handle.status = TxStatus::Failed { reason };
+                if self.state_store.put_handle(handle).await.is_ok() {
+                    self.on_settled(handle).await;
+                    info!(intent_hash = ?handle.intent_hash, "relay task failed");
+                }
+            }
+            Ok(RelayStatus::Pending) => {} // still queued — poll again next tick
+            Err(_e) => {
+                warn!(intent_hash = ?handle.intent_hash, "relay task poll failed; will retry")
+            }
+        }
+    }
+
+    /// Terminal bookkeeping for a just-persisted handle: drop its cached bump approval and, if a
+    /// *foreign* tx replaced it (never a cancel — that settled `Dropped`), re-execute the intent
+    /// when refill is enabled.
+    async fn on_settled(&self, handle: &TxHandle) {
+        self.approvals.lock().remove(&handle.id);
+        if let Some(manager) = &self.refill
+            && handle.status == TxStatus::Replaced
+        {
+            self.refill_intent(manager, handle).await;
+        }
     }
 
     /// Best-effort re-execution of a displaced intent at a fresh nonce + fresh approval. The
@@ -415,14 +479,36 @@ impl AccountExecutor {
     }
 }
 
+/// A managed-relay handle whose task has not yet produced an on-chain hash — advanced by polling
+/// the relay, not by reading the chain. Once its hash is recorded it is a normal chain-tracked tx.
+fn is_awaiting_relay(handle: &TxHandle) -> bool {
+    handle.broadcasts.is_empty() && handle.meta.as_ref().is_some_and(|meta| meta.task.is_some())
+}
+
+/// Emit a lifecycle transition at the right level: a terminal outcome is a milestone (INFO), an
+/// intermediate advance is mechanics (DEBUG). `_prev` is underscored so it stays warning-free
+/// when the obs macros compile to no-ops (`--no-default-features`).
+fn log_transition(handle: &TxHandle, _prev: &TxStatus) {
+    if handle.status.is_terminal() {
+        info!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "transaction settled");
+    } else {
+        debug!(intent_hash = ?handle.intent_hash, from = ?_prev, to = ?handle.status, "status advanced");
+    }
+}
+
 /// The execution outcome for a mined receipt, honoring gasless confirm-safety: a meta-tx whose
 /// *outer* receipt succeeded still `Reverted`s unless the forwarder's `ExecutedForwardRequest`
 /// proves the *inner* call also ran — a mined `execute()` is not evidence the user's intent
 /// executed (H's no-false-`Confirmed` ethic, applied to meta-transactions).
 fn outcome_of(receipt: &TransactionReceipt, handle: &TxHandle) -> Outcome {
     let inner_ok = match &handle.meta {
-        Some(meta) => meta.inner_succeeded(receipt.logs()),
-        None => true,
+        // Self-relay: we submitted an OZ `execute()`, so the outer receipt alone is not proof —
+        // decode the forwarder's `ExecutedForwardRequest` to confirm the *inner* call ran.
+        Some(meta) if meta.task.is_none() => meta.inner_succeeded(receipt.logs()),
+        // Managed relay (Gelato, `task = Some`) or a plain tx: no OZ event to decode. Gelato only
+        // surfaced this hash on an `ExecSuccess` verdict, so the recorded receipt's own success is
+        // the honest signal (a reverted receipt still fails below); a plain tx has no inner call.
+        _ => true,
     };
     match receipt.status() && inner_ok {
         true => Outcome::Executed,
@@ -461,13 +547,14 @@ pub enum ExecutorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::deps::{Flashbots, Protect, SubmissionOpts};
+    use crate::core::deps::{Flashbots, Protect, RelayError, SubmissionOpts, TaskId};
     use crate::core::wallet::{GasEnvelope, MetaContext};
     use crate::testutils::{
         Harness, MockClock, MockGas, MockPolicy, MockRpc, MockStore, MockSubmit, Submit,
         estimation, handle, receipt, receipt_unanchored, signed_legacy,
     };
     use alloy_primitives::{B256, Bytes, U256};
+    use async_trait::async_trait;
 
     // --- Private routing ---
 
@@ -698,6 +785,7 @@ mod tests {
             forwarder: Address::ZERO,
             signer: Address::ZERO,
             nonce: U256::ZERO,
+            task: None,
         });
         assert_eq!(outcome_of(&mined_ok, &meta), Outcome::Reverted);
 
@@ -706,6 +794,102 @@ mod tests {
             outcome_of(&receipt(false, 8, B256::ZERO), &plain),
             Outcome::Reverted
         );
+    }
+
+    #[test]
+    fn gelato_task_handle_trusts_the_relay_verdict_not_the_oz_event() {
+        // A managed-relay (Gelato) handle records its hash only after an `ExecSuccess` verdict, so
+        // a successful outer receipt IS the honest inclusion signal — unlike self-relay, no OZ
+        // `ExecutedForwardRequest` is decoded (Gelato's forwarder emits a different event). This is
+        // the branch that would falsely `Failed` every Gelato tx if it reused the self-relay decode.
+        let mined_ok = receipt(true, 8, B256::ZERO);
+        let mut gelato = handle(4, TxStatus::Sent);
+        gelato.meta = Some(MetaContext::for_gelato_task(
+            Address::ZERO,
+            Address::ZERO,
+            U256::ZERO,
+            TaskId::new("t1"),
+        ));
+        assert_eq!(outcome_of(&mined_ok, &gelato), Outcome::Executed);
+        // A reverted outer receipt still fails — the task verdict never rescues a bad receipt.
+        assert_eq!(
+            outcome_of(&receipt(false, 8, B256::ZERO), &gelato),
+            Outcome::Reverted
+        );
+    }
+
+    /// A stub managed relay returning one canned status per poll.
+    struct MockRelay(RelayStatus);
+
+    #[async_trait]
+    impl Relay for MockRelay {
+        async fn poll(&self, _task: &TaskId) -> Result<RelayStatus, RelayError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A task-pending Gelato handle: no signed bytes (the relay submits) and no on-chain hash yet.
+    fn task_handle() -> TxHandle {
+        let mut h = handle(0, TxStatus::Sent);
+        h.signed = Bytes::new();
+        h.broadcasts = vec![];
+        h.meta = Some(MetaContext::for_gelato_task(
+            Address::ZERO,
+            h.account,
+            U256::ZERO,
+            TaskId::new("task-1"),
+        ));
+        h
+    }
+
+    #[tokio::test]
+    async fn task_handle_records_the_hash_on_relay_inclusion() {
+        // The poll branch: a managed-relay handle with no hash is advanced by polling, not by the
+        // chain. An `Included` verdict records the on-chain hash (and stays `Sent`) so the *next*
+        // confirm cycle anchors and depth-confirms it exactly like any other tx.
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&task_handle()).await.unwrap();
+        let hash = B256::repeat_byte(9);
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 0,
+                block_number: 10,
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .executor()
+            .with_relay(Arc::new(MockRelay(RelayStatus::Included(hash))))
+            .confirm()
+            .await
+            .unwrap();
+        let got = &store.all()[0];
+        assert_eq!(got.broadcasts, vec![hash], "the included hash is recorded");
+        assert_eq!(
+            got.status,
+            TxStatus::Sent,
+            "handoff to the chain-confirm path"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_handle_settles_failed_on_relay_drop() {
+        // A relay `Failed` verdict (ExecReverted / Cancelled) is terminal — the handle settles
+        // `Failed` rather than polling forever.
+        let store = Arc::new(MockStore::default());
+        store.put_handle(&task_handle()).await.unwrap();
+        Harness::default()
+            .rpc(Arc::new(MockRpc {
+                tx_count: 0,
+                block_number: 10,
+                ..Default::default()
+            }))
+            .store(store.clone())
+            .executor()
+            .with_relay(Arc::new(MockRelay(RelayStatus::Failed("cancelled".into()))))
+            .confirm()
+            .await
+            .unwrap();
+        assert!(matches!(store.all()[0].status, TxStatus::Failed { .. }));
     }
 
     #[tokio::test]

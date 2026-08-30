@@ -10,6 +10,7 @@
 //!   header alloy's provider can't attach — so this one path posts directly via `reqwest`.
 
 use crate::adapters::Transport;
+use crate::adapters::http;
 use crate::core::deps::{
     Flashbots, PrivateRoute, ProtectRelay, RouteError, Rpc, RpcError, SubmissionError,
     SubmissionOpts, SubmissionRoute, SubmissionStrategy,
@@ -267,20 +268,25 @@ fn net_err(e: reqwest::Error) -> SubmissionError {
 }
 
 /// Turn the Flashbots HTTP response into a tx hash or a classified error. Pure (no I/O) so
-/// the safety-critical mapping — a rejection must never look "sent" — is unit-tested.
+/// the safety-critical mapping — a rejection must never look "sent" — is unit-tested. Shares the
+/// auth/transient status triage with the other relay-posting adapters ([`crate::adapters::http`]).
 fn classify_flashbots(status: StatusCode, body: &str) -> Result<TxHash, SubmissionError> {
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return Err(SubmissionError::RelayAuth {
-            message: format!("flashbots: {}", clip(body)),
-        });
+    match http::classify_status(status) {
+        http::HttpClass::Unauthorized => {
+            return Err(SubmissionError::RelayAuth {
+                message: format!("flashbots: {}", http::clip(body)),
+            });
+        }
+        http::HttpClass::Transient => {
+            return Err(SubmissionError::Rpc(RpcError::Call {
+                message: format!("flashbots {status}: {}", http::clip(body)),
+                transient: true,
+            }));
+        }
+        http::HttpClass::Body => {}
     }
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        return Err(SubmissionError::Rpc(RpcError::Call {
-            message: format!("flashbots {status}: {}", clip(body)),
-            transient: true,
-        }));
-    }
-    let resp: JsonRpcResponse = serde_json::from_str(body).map_err(|_| rejected(clip(body)))?;
+    let resp: JsonRpcResponse =
+        serde_json::from_str(body).map_err(|_| rejected(http::clip(body)))?;
     if let Some(err) = resp.error {
         // A node "already known"/"nonce too low"/underpriced message settles as an RPC
         // outcome, not a hard relay rejection — reuse the canonical predicates to decide.
@@ -294,7 +300,7 @@ fn classify_flashbots(status: StatusCode, body: &str) -> Result<TxHash, Submissi
         return Err(rejected(err.message));
     }
     resp.result
-        .ok_or_else(|| rejected(format!("no result in response: {}", clip(body))))
+        .ok_or_else(|| rejected(format!("no result in response: {}", http::clip(body))))
 }
 
 /// A hard Flashbots rejection carrying the relay's message.
@@ -302,11 +308,6 @@ fn rejected(message: impl std::fmt::Display) -> SubmissionError {
     SubmissionError::RelayRejected {
         message: format!("flashbots: {message}"),
     }
-}
-
-/// Bound a relay's message so a large body can't bloat an error/log.
-fn clip(text: &str) -> String {
-    text.chars().take(200).collect()
 }
 
 #[cfg(test)]

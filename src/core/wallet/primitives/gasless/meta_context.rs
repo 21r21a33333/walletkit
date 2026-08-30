@@ -4,6 +4,7 @@
 //! for meta-transactions.
 
 use super::forward_request::ExecutedForwardRequest;
+use crate::core::deps::TaskId;
 use alloy_primitives::{Address, U256};
 use alloy_rpc_types_eth::Log;
 use alloy_sol_types::SolEvent;
@@ -12,6 +13,13 @@ use serde::{Deserialize, Serialize};
 /// Non-secret context identifying the forwarder `execute()` behind a gasless send. Persisted on
 /// the [`TxHandle`](crate::core::wallet::TxHandle) so the confirm path can decode the request's
 /// `ExecutedForwardRequest(signer, nonce, success)` — the Gelato api key is never stored here.
+///
+/// Two shapes, distinguished by [`task`](Self::task):
+/// - **self-relay** (`task = None`): we sent the outer `execute()` ourselves, so confirm-safety
+///   is the OZ [`inner_succeeded`](Self::inner_succeeded) event decode over the receipt.
+/// - **managed relay** (`task = Some`): a third party (Gelato) submits, so the executor first
+///   polls the task to an on-chain hash; the relay's `ExecSuccess` verdict is the safety signal,
+///   and the event decode does not apply (a different forwarder emits a different event).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MetaContext {
@@ -21,6 +29,10 @@ pub struct MetaContext {
     pub signer: Address,
     /// The forwarder nonce the request consumed — disambiguates the matching event.
     pub nonce: U256,
+    /// Present iff a managed relay submits this request: the task to poll until an on-chain hash
+    /// appears. `None` for self-relay (the outer tx's hash is known at send time).
+    #[serde(default)]
+    pub task: Option<TaskId>,
 }
 
 impl MetaContext {
@@ -31,6 +43,25 @@ impl MetaContext {
             forwarder: signed.forwarder,
             signer: signed.request.from,
             nonce: signed.request.nonce,
+            task: None,
+        }
+    }
+
+    /// The tracking context for a managed-relay (Gelato) send: the relay `verifyingContract` the
+    /// user signed against, the `user`, the request's nonce (or `0` for salt-based concurrent
+    /// sends), and the `task` the executor polls to an on-chain hash. Unlike self-relay, the
+    /// on-chain event is not decoded — the relay's `ExecSuccess` verdict gates the recorded hash.
+    pub(crate) fn for_gelato_task(
+        forwarder: Address,
+        user: Address,
+        nonce: U256,
+        task: TaskId,
+    ) -> Self {
+        Self {
+            forwarder,
+            signer: user,
+            nonce,
+            task: Some(task),
         }
     }
 
@@ -77,6 +108,7 @@ mod tests {
             forwarder: Address::ZERO,
             signer: Address::repeat_byte(1),
             nonce: U256::from(7u64),
+            task: None,
         };
 
         assert!(ctx.inner_succeeded(&[log(ctx.signer, ctx.nonce, true)]));

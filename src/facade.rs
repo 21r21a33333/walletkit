@@ -6,12 +6,12 @@
 
 use crate::adapters::policy::{AllowAll, DefaultPolicyEngine};
 use crate::adapters::{
-    InMemoryStateStore, LocalNonceManager, PrivateMev, PublicMempool, Router, RpcGasOracle,
-    SystemClock, Transport,
+    GelatoRelay, InMemoryStateStore, LocalNonceManager, PrivateMev, PublicMempool, Router,
+    RpcGasOracle, SystemClock, Transport,
 };
 use crate::core::deps::{
-    Clock, GaslessOpts, GaslessRoute, PolicyEngine, RelayError, Rpc, Signer, StateStore,
-    SubmissionOpts, SubmissionStrategy,
+    Clock, Deadline, GaslessOpts, GaslessRoute, Gelato, PolicyEngine, Relay, RelayError, Rpc,
+    Signer, StateStore, SubmissionOpts, SubmissionStrategy,
 };
 use crate::core::wallet::{
     AccountExecutor, ForwarderDomain, HandleId, MetaContext, PolicyOutcome, SignatureEnvelope,
@@ -20,7 +20,7 @@ use crate::core::wallet::{
 };
 use crate::error::WalletKitError;
 use alloy_dyn_abi::TypedData;
-use alloy_primitives::{Address, Bytes, TxKind};
+use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_signer_local::PrivateKeySigner;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,13 +36,22 @@ pub struct Wallet {
     rpc: Arc<dyn Rpc>,
     policy: Arc<dyn PolicyEngine>,
     account: Address,
-    /// The relayer account's runtime, present only when a relayer + forwarder are configured
-    /// (Model 1). Its executor is ticked alongside the user's; it owns the outer `execute()` tx.
-    gasless: Option<GaslessRuntime>,
+    /// The wallet's gasless backend, if one is configured — at most one (self-relay *or* Gelato).
+    gasless: Option<GaslessBackend>,
 }
 
-/// The relayer account's runtime for gasless meta-transactions (Model 1): a second operated
-/// account with its own send pipeline + tracking executor, distinct from the user account.
+/// A wallet's single gasless backend. The two are mutually exclusive by construction — a wallet
+/// relays gaslessly one way, so an enum (not two independent `Option`s) is the honest model.
+enum GaslessBackend {
+    /// Self-relay (Model 1): a second operated account submits + tracks the outer `execute()` tx.
+    /// Boxed — a [`GaslessRuntime`] (a whole second executor) dwarfs the one-word `Gelato` variant.
+    SelfRelay(Box<GaslessRuntime>),
+    /// Managed relay (Gelato): a third party submits + pays; the user's executor polls its task.
+    Gelato(Arc<GelatoRelay>),
+}
+
+/// The relayer account's runtime for self-relay gasless meta-transactions (Model 1): a second
+/// operated account with its own send pipeline + tracking executor, distinct from the user account.
 struct GaslessRuntime {
     /// The relayer's send pipeline (signs and pays for the outer `execute()` tx).
     manager: Arc<TransactionManager>,
@@ -76,6 +85,7 @@ impl Wallet {
             relayer: None,
             forwarder: None,
             relayer_policy: None,
+            gelato: None,
         }
     }
 
@@ -138,45 +148,57 @@ impl Wallet {
         Ok(self.manager.cancel(id).await?)
     }
 
-    /// Send `intent` gaslessly (ERC-2771): the user signs a `ForwardRequest` (free, no ETH) and
-    /// the configured **relayer** account submits + pays for the outer `execute()`, whose
-    /// executor tracks/confirms/bumps it — the target still sees the *user* as `_msgSender`.
-    /// Returns the outer tx's handle. Requires a relayer + forwarder
-    /// ([`WalletBuilder::relayer`]/[`forwarder`](WalletBuilder::forwarder)); without them it
-    /// fails cleanly **before** signing (never a panic, never a leak to the user's account).
+    /// Send `intent` gaslessly (ERC-2771): the user signs a free request (no ETH) and a third party
+    /// submits + pays, while the target still sees the *user* as `_msgSender`. `opts` selects the
+    /// backend — [`SelfRelay`](crate::core::deps::SelfRelay) (our relayer account pays) or
+    /// [`GaslessOpts::gelato`] (a managed Gelato relay pays). Returns the tracked handle. If the
+    /// selected backend isn't configured ([`WalletBuilder::relayer`]/[`forwarder`](WalletBuilder::forwarder)
+    /// for self-relay, [`gelato`](WalletBuilder::gelato) for Gelato), it fails cleanly **before**
+    /// signing — never a panic, never a leak to the user's account.
     pub async fn send_gasless(
         &self,
         intent: &TxIntent,
         opts: impl Into<GaslessOpts>,
     ) -> Result<TxHandle, WalletKitError> {
         let opts = opts.into();
-        let gasless = self
-            .gasless
-            .as_ref()
-            .ok_or(WalletKitError::Relay(RelayError::NotConfigured))?;
-        let submission = match opts.route {
-            GaslessRoute::SelfRelay(self_relay) => self_relay.submission,
-            GaslessRoute::Gelato(_) => {
-                return Err(WalletKitError::Relay(RelayError::Rejected {
-                    message: "managed (Gelato) relay is not yet available".into(),
-                }));
+        // Dispatch to the configured backend; a route with no matching backend (or none at all)
+        // is the one clean rejection point — terminal, before any signing.
+        match (opts.route, &self.gasless) {
+            (GaslessRoute::SelfRelay(route), Some(GaslessBackend::SelfRelay(runtime))) => {
+                self.send_self_relay(runtime, intent, route.submission, opts.deadline)
+                    .await
             }
-        };
+            (GaslessRoute::Gelato, Some(GaslessBackend::Gelato(relay))) => {
+                self.send_gelato(relay, intent, opts.deadline).await
+            }
+            _ => Err(WalletKitError::Relay(RelayError::NotConfigured)),
+        }
+    }
+
+    /// Self-relay (Model 1): our funded relayer account submits + pays for the outer `execute()`
+    /// and its executor tracks it.
+    async fn send_self_relay(
+        &self,
+        runtime: &GaslessRuntime,
+        intent: &TxIntent,
+        submission: SubmissionOpts,
+        deadline: Deadline,
+    ) -> Result<TxHandle, WalletKitError> {
         // The user authorizes + signs the request through *their* policy gate — never sends.
         let signed = self
             .manager
             .build_and_sign_forward_request(
                 intent,
-                gasless.forwarder,
+                runtime.forwarder,
                 &ForwarderDomain::default(),
-                opts.deadline.0,
+                deadline.0,
             )
             .await?;
         // The relayer submits and pays for the outer execute(), tracked under its account + meta.
         let outer = TxIntent {
             chain_id: intent.chain_id,
-            account: gasless.manager.account(),
-            to: TxKind::Call(gasless.forwarder),
+            account: runtime.manager.account(),
+            to: TxKind::Call(runtime.forwarder),
             value: intent.value,
             input: execute_calldata(
                 &signed.request,
@@ -185,10 +207,39 @@ impl Wallet {
             purpose: None,
         };
         let meta = MetaContext::for_request(&signed);
-        Ok(gasless
+        Ok(runtime
             .manager
             .send_with_meta(&outer, &submission, Some(meta))
             .await?)
+    }
+
+    /// Managed relay (Gelato): the user signs Gelato's own EIP-712 request through *their* policy
+    /// gate, Gelato submits + pays, and the returned task is persisted under the user account for
+    /// the executor to poll to inclusion.
+    async fn send_gelato(
+        &self,
+        relay: &GelatoRelay,
+        intent: &TxIntent,
+        deadline: Deadline,
+    ) -> Result<TxHandle, WalletKitError> {
+        let deadline = U256::from(self.manager.now_unix().saturating_add(deadline.0.as_secs()));
+        // The adapter reads the sequential nonce (or derives the concurrent salt) and shapes the
+        // Gelato struct; the user signs it via the existing gate — gasless is not a policy bypass.
+        let call = relay
+            .build_call(intent, self.rpc.as_ref(), deadline)
+            .await?;
+        let signature = self
+            .manager
+            .sign_typed_data(&relay.typed_data(&call))
+            .await?;
+        let task = relay.submit(&call, &signature).await?;
+        let meta = MetaContext::for_gelato_task(
+            relay.verifying_contract(),
+            call.user(),
+            call.nonce(),
+            task,
+        );
+        Ok(self.manager.persist_task_handle(intent, meta).await?)
     }
 
     /// Simulate an intent without signing or broadcasting: gas (advisory), success or a
@@ -238,14 +289,14 @@ impl Wallet {
         Ok(self.handle(id).await?.map(|handle| handle.status))
     }
 
-    /// One executor cycle: recover in-flight → confirm progress → escalate stuck. Drives the
-    /// relayer's executor too when gasless is configured, so outer `execute()` txs are tracked
-    /// on the same cadence.
+    /// One executor cycle: recover in-flight → confirm progress → escalate stuck. Self-relay adds a
+    /// *second* executor (the relayer account) driven on the same cadence; Gelato needs none — the
+    /// user's own executor polls its task in the same confirm pass.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
     pub async fn tick(&self) -> Result<(), WalletKitError> {
         self.executor.tick().await?;
-        if let Some(gasless) = &self.gasless {
-            gasless.executor.tick().await?;
+        if let Some(GaslessBackend::SelfRelay(runtime)) = &self.gasless {
+            runtime.executor.tick().await?;
         }
         Ok(())
     }
@@ -316,6 +367,7 @@ pub struct WalletBuilder {
     relayer: Option<Arc<dyn Signer>>,
     forwarder: Option<Address>,
     relayer_policy: Option<Arc<dyn PolicyEngine>>,
+    gelato: Option<Gelato>,
 }
 
 impl WalletBuilder {
@@ -391,6 +443,15 @@ impl WalletBuilder {
         self
     }
 
+    /// Register a managed [`Gelato`] relay for `send_gasless(_, GaslessOpts::gelato())`. Gelato
+    /// submits and pays; the sponsor key and fee/nonce scheme are set **once here** and never
+    /// travel on a send call. Needs no relayer account or forwarder — Gelato *is* the operated
+    /// relayer, and its public status endpoint is polled by the user's own executor.
+    pub fn gelato(mut self, gelato: Gelato) -> Self {
+        self.gelato = Some(gelato);
+        self
+    }
+
     /// Wire the runtime. Infallible — the account is `signer.address()` and every port
     /// is supplied, so there is nothing to validate.
     pub fn build(self) -> Wallet {
@@ -447,11 +508,17 @@ impl WalletBuilder {
             executor = executor.with_refill(manager.clone());
         }
 
-        // Model 1: a relayer + forwarder configures a *second* operated account — its own
-        // manager + executor — that sends and tracks the outer `execute()` tx. The relayer's
-        // policy defaults to permissive (the user's request is already gated on its own path).
-        let gasless = match (self.relayer, self.forwarder) {
-            (Some(relayer_signer), Some(forwarder)) => {
+        // A wallet has at most one gasless backend. Self-relay (Model 1) configures a *second*
+        // operated account — its own manager + executor — that sends and tracks the outer
+        // `execute()` tx; its policy defaults to permissive (the user's request is already gated on
+        // its own path). Managed Gelato needs no second account — Gelato submits and pays, so the
+        // user's own executor polls its task. Configuring both is a wiring error; self-relay wins.
+        debug_assert!(
+            !(self.relayer.is_some() && self.forwarder.is_some() && self.gelato.is_some()),
+            "configure at most one gasless backend (self-relay or Gelato), not both"
+        );
+        let gasless = match (self.relayer, self.forwarder, self.gelato) {
+            (Some(relayer_signer), Some(forwarder), _) => {
                 let relayer_account = relayer_signer.address();
                 let relayer_policy = self.relayer_policy.unwrap_or_else(|| {
                     Arc::new(DefaultPolicyEngine::new(
@@ -486,11 +553,16 @@ impl WalletBuilder {
                 if let Some(secs) = self.bump_timeout {
                     relayer_executor = relayer_executor.with_bump_timeout(secs);
                 }
-                Some(GaslessRuntime {
+                Some(GaslessBackend::SelfRelay(Box::new(GaslessRuntime {
                     manager: relayer_manager,
                     executor: relayer_executor,
                     forwarder,
-                })
+                })))
+            }
+            (_, _, Some(config)) => {
+                let relay = Arc::new(GelatoRelay::new(config));
+                executor = executor.with_relay(relay.clone() as Arc<dyn Relay>);
+                Some(GaslessBackend::Gelato(relay))
             }
             _ => None,
         };
@@ -648,6 +720,35 @@ mod tests {
         );
         let err = wallet
             .send_gasless(&intent, SelfRelay::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WalletKitError::Relay(RelayError::NotConfigured)
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_gasless_gelato_without_registration_is_rejected() {
+        // Selecting the managed relay with no `.gelato(...)` registered must fail cleanly
+        // (terminal), never a panic and never a leak onto the user's account.
+        use crate::core::deps::GaslessOpts;
+        use alloy_primitives::U256;
+        let wallet = Wallet::builder(
+            Arc::new(MockRpc::default()),
+            Arc::new(MockSigner::default()),
+            Arc::new(MockPolicy::default()),
+        )
+        .build();
+        let intent = TxIntent::call(
+            1,
+            Address::ZERO,
+            Address::from([0x22; 20]),
+            U256::ZERO,
+            alloy_primitives::Bytes::from_static(&[0xaa]),
+        );
+        let err = wallet
+            .send_gasless(&intent, GaslessOpts::gelato())
             .await
             .unwrap_err();
         assert!(matches!(
