@@ -11,6 +11,7 @@ pub mod policy_engine;
 #[cfg(feature = "pricing")]
 pub mod pricing;
 pub mod read;
+pub mod relay;
 pub mod rpc;
 pub mod signer;
 pub mod state_store;
@@ -24,6 +25,10 @@ pub use policy_engine::{PolicyEngine, PolicyEngineError};
 #[cfg(feature = "pricing")]
 pub use pricing::{Currency, Price, PriceSource, PricingError, TokenMetadataSource};
 pub use read::{AccountBalances, Erc20Metadata, ReadClient, ReadError, TokenBalance};
+pub use relay::{
+    Deadline, FeeScheme, GaslessOpts, GaslessRoute, Gelato, NonceScheme, Relay, RelayError,
+    RelayStatus, SelfRelay, SignedRequest, TaskId,
+};
 pub use rpc::{AccountActivity, Rpc, RpcError, Simulated};
 pub use signer::{Signer, SignerError};
 pub use state_store::{StateStore, StateStoreError, Versioned};

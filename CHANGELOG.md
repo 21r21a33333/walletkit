@@ -18,11 +18,27 @@ All notable changes to walletkit are documented here. The format follows
   persisted `Escalation::PublicAfter`. New `SubmissionError` variants `RelayAuth`/`RelayRejected`
   are never mistaken for "sent"; a private send with no relay configured fails cleanly
   (`RouteError::RelayNotConfigured`) before signing.
+- **Gasless meta-transactions (ERC-2771)** (sub-project J): `Wallet::send_gasless` lets a user
+  sign a free request (no ETH, no nonce spent) that a third party submits and pays, while the
+  target still reads the *user* as `_msgSender()`. Two backends, chosen at build time.
+  **Self-relay** (`WalletBuilder::relayer` + `forwarder`) operates a funded relayer as its own
+  tracked account (Model 1) and composes with private submission via `SelfRelay::via(..)`;
+  **managed Gelato** (`WalletBuilder::gelato(Gelato::sponsored(key))` / `::sync_fee(token)`, with
+  `.sequential()`/`.concurrent()`) submits + pays and is polled to inclusion via the `Relay` port.
+  Confirmation is honest — a meta-tx is `Confirmed` only when the inner call actually ran
+  (forwarder `ExecutedForwardRequest` decode for self-relay; the relay's `ExecSuccess` verdict then
+  a depth-anchored hash for Gelato), **never a false `Confirmed`**; an unconfigured backend fails
+  `RelayError::NotConfigured` before signing. The request is policy-gated as EIP-712 typed data
+  (allow the forwarder's `verifyingContract` via `TypedDataDomainAllowlist`), not a bypass. The
+  Gelato sponsor key is registered once and is never serialized, logged, or persisted on a handle.
 
 ### Changed
 - **`SubmissionStrategy::submit` gained a `&SubmissionOpts` parameter** (pre-1.0 minor =
   breaking). `TxHandle` gains a `submission` field (defaults to `Public` for legacy
   records). New dependency: `reqwest` (rustls, for the Flashbots POST).
+- **Gasless (sub-project J):** `TxHandle` gains an optional `meta` field (the gasless tracking
+  context; defaults to `None` for legacy/non-gasless records). No new dependency — reuses
+  `reqwest`, alloy `sol!`/`sol-types`/`dyn-abi`, and `serde`.
 
 ## [0.1.0] - 2026-08-27
 

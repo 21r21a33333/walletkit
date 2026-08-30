@@ -33,7 +33,7 @@ sol! {
 use walletkit::adapters::PostgresStateStore;
 #[cfg(feature = "redb")]
 use walletkit::adapters::RedbStateStore;
-use walletkit::adapters::policy::{DefaultPolicyEngine, TargetAllowlist};
+use walletkit::adapters::policy::{DefaultPolicyEngine, TargetAllowlist, TypedDataDomainAllowlist};
 use walletkit::adapters::{InMemoryStateStore, LocalSigner, SystemClock, Transport};
 use walletkit::core::deps::{Clock, PolicyEngine, Rpc, Signer, StateStore};
 use walletkit::core::wallet::TxIntent;
@@ -198,12 +198,10 @@ impl Localnet {
             .address()
     }
 
-    /// Deploy the committed mock ERC-20 from funded account `deployer_index` and return its
-    /// address. The constructor mints the full supply to the deployer.
-    pub async fn deploy_mock_erc20(&self, deployer_index: u32) -> Address {
+    /// Deploy `code` (creation bytecode, constructor args already appended) from funded account
+    /// `deployer_index` and return the deployed address.
+    async fn deploy_code(&self, deployer_index: u32, code: Bytes) -> Address {
         use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
-        let hex = include_str!("fixtures/mock_erc20.bin").trim();
-        let code = Bytes::from(alloy_primitives::hex::decode(hex).expect("valid hex"));
         let tx = TransactionRequest {
             from: Some(self.account_at(deployer_index)),
             input: TransactionInput::new(code),
@@ -218,6 +216,102 @@ impl Localnet {
             .await
             .expect("deploy receipt");
         receipt.contract_address.expect("contract address")
+    }
+
+    /// Deploy the committed mock ERC-20 from funded account `deployer_index` and return its
+    /// address. The constructor mints the full supply to the deployer.
+    pub async fn deploy_mock_erc20(&self, deployer_index: u32) -> Address {
+        let hex = include_str!("fixtures/mock_erc20.bin").trim();
+        let code = Bytes::from(alloy_primitives::hex::decode(hex).expect("valid hex"));
+        self.deploy_code(deployer_index, code).await
+    }
+
+    /// Deploy the real OZ `ERC2771Forwarder` (name `"ERC2771Forwarder"`, version `"1"`) and
+    /// return its address — the trusted forwarder gasless requests are relayed through.
+    pub async fn deploy_erc2771_forwarder(&self, deployer_index: u32) -> Address {
+        let hex = include_str!("fixtures/erc2771_forwarder.bin").trim();
+        let code = Bytes::from(alloy_primitives::hex::decode(hex).expect("valid hex"));
+        self.deploy_code(deployer_index, code).await
+    }
+
+    /// Deploy the ERC-2771 `RecordingTarget` bound to `forwarder`. The single `address`
+    /// constructor arg is ABI-encoded (left-padded to a word) onto the creation code.
+    pub async fn deploy_erc2771_target(&self, deployer_index: u32, forwarder: Address) -> Address {
+        let hex = include_str!("fixtures/erc2771_target.bin").trim();
+        let mut code = alloy_primitives::hex::decode(hex).expect("valid hex");
+        code.extend_from_slice(&[0u8; 12]);
+        code.extend_from_slice(forwarder.as_slice());
+        self.deploy_code(deployer_index, Bytes::from(code)).await
+    }
+
+    /// `eth_call` a `view` on `to` with `input`, returning the raw ABI return bytes.
+    async fn eth_call(&self, to: Address, input: Bytes) -> Bytes {
+        use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
+        let tx = TransactionRequest {
+            to: Some(TxKind::Call(to)),
+            input: TransactionInput::new(input),
+            ..Default::default()
+        };
+        self.control
+            .raw_request::<_, Bytes>("eth_call".into(), (tx, "latest"))
+            .await
+            .expect("eth_call")
+    }
+
+    /// The `RecordingTarget.lastSender()` — the caller the target saw via ERC-2771
+    /// `_msgSender()` (the *user* for a correctly-relayed meta-tx, not the relayer).
+    pub async fn target_last_sender(&self, target: Address) -> Address {
+        let out = self
+            .eth_call(target, Bytes::from_static(&[0x25, 0x6f, 0xec, 0x88]))
+            .await;
+        Address::from_slice(&out[12..32])
+    }
+
+    /// The `RecordingTarget.pokes()` counter — how many times the inner call actually ran.
+    pub async fn target_pokes(&self, target: Address) -> U256 {
+        let out = self
+            .eth_call(target, Bytes::from_static(&[0x8a, 0xc7, 0x33, 0x05]))
+            .await;
+        U256::from_be_slice(&out)
+    }
+
+    /// The on-chain (mined) transaction count for `account` — proves whether it ever sent a tx
+    /// (e.g. that a pre-sign-rejected gasless send never made the relayer spend a nonce).
+    pub async fn onchain_tx_count(&self, account: Address) -> u64 {
+        self.control
+            .get_transaction_count(account)
+            .await
+            .expect("tx count")
+    }
+
+    /// A two-account gasless wallet: `user_index` signs the free `ForwardRequest`, `relayer_index`
+    /// funds + sends the outer `execute()` through `forwarder`. The user's policy allows EIP-712
+    /// signing for exactly that forwarder; the relayer rides the facade's default (`AllowAll`).
+    pub fn gasless_wallet(
+        &self,
+        user_index: u32,
+        relayer_index: u32,
+        forwarder: Address,
+        confirmations: u64,
+    ) -> Arc<Wallet> {
+        let rpc = rpc_for(&self.endpoint).expect("transport");
+        build_gasless_wallet(rpc, user_index, relayer_index, forwarder, confirmations)
+    }
+
+    /// As [`gasless_wallet`](Self::gasless_wallet) but with the transport wrapped in a
+    /// [`FaultRpc`](fault::FaultRpc) — so a reorg can be injected against the relayer's outer
+    /// `execute()` tx and confirm-safety asserted end-to-end.
+    pub fn gasless_fault_wallet(
+        &self,
+        user_index: u32,
+        relayer_index: u32,
+        forwarder: Address,
+        confirmations: u64,
+        faults: &Arc<fault::Faults>,
+    ) -> Arc<Wallet> {
+        let inner = rpc_for(&self.endpoint).expect("transport");
+        let rpc: Arc<dyn Rpc> = Arc::new(fault::FaultRpc::new(inner, faults.clone()));
+        build_gasless_wallet(rpc, user_index, relayer_index, forwarder, confirmations)
     }
 
     /// Inject the canonical Multicall3 at its well-known address via `anvil_setCode`. anvil
@@ -387,6 +481,35 @@ fn build_wallet(
             .gas_ceiling(u128::MAX)
             .refill_on_replaced(refill_on_replaced)
             .store(store)
+            .build(),
+    )
+}
+
+/// Build a Model-1 gasless `Wallet` over `rpc`: the `user_index` account signs the
+/// `ForwardRequest` (its policy allows EIP-712 only for `forwarder`), and the `relayer_index`
+/// account is the funded second operated account that sends the outer `execute()`.
+fn build_gasless_wallet(
+    rpc: Arc<dyn Rpc>,
+    user_index: u32,
+    relayer_index: u32,
+    forwarder: Address,
+    confirmations: u64,
+) -> Arc<Wallet> {
+    let user = LocalSigner::from_mnemonic(ANVIL_MNEMONIC, user_index).expect("user signer");
+    let relayer =
+        LocalSigner::from_mnemonic(ANVIL_MNEMONIC, relayer_index).expect("relayer signer");
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(
+        vec![Box::new(TypedDataDomainAllowlist::new([forwarder]))],
+        clock,
+    ));
+    Arc::new(
+        Wallet::builder(rpc, Arc::new(user), policy)
+            .relayer(Arc::new(relayer))
+            .forwarder(forwarder)
+            .confirmations(confirmations)
+            .bump_timeout(0)
+            .gas_ceiling(u128::MAX)
             .build(),
     )
 }

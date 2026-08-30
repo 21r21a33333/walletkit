@@ -6,19 +6,22 @@
 use super::signing;
 use crate::core::deps::{
     Clock, GasOracle, GasOracleError, NonceManager, NonceManagerError, PolicyEngine,
-    PolicyEngineError, RouteError, Rpc, RpcError, Signer, SignerError, StateStore, StateStoreError,
-    SubmissionError, SubmissionOpts, SubmissionStrategy,
+    PolicyEngineError, RelayError, RouteError, Rpc, RpcError, SignedRequest, Signer, SignerError,
+    Simulated, StateStore, StateStoreError, SubmissionError, SubmissionOpts, SubmissionStrategy,
 };
 use crate::core::wallet::{
-    Decision, HandleId, IntentHash, PolicyApproval, PolicyRejection, SignatureEnvelope,
-    SigningRequest, TxHandle, TxIntent, TxStatus,
+    Decision, ForwardRequest, ForwarderDomain, GasEnvelope, HandleId, IntentHash, MetaContext,
+    PolicyApproval, PolicyRejection, SignatureEnvelope, SigningRequest, TxHandle, TxIntent,
+    TxStatus, decode_forwarder_nonce, nonces_calldata,
 };
+use crate::error::WalletKitError;
 use crate::obs::{debug, error, info, warn};
 use alloy_dyn_abi::TypedData;
 use alloy_eips::eip1559::Eip1559Estimation;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{Address, Bytes, TxKind, U256, aliases::U48};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Gas-limit buffer over `eth_estimateGas`. viem/ethers trust the raw estimate, but it
 /// can underestimate for gas-forwarding / failure-swallowing contracts (geth #21746,
@@ -147,19 +150,33 @@ impl TransactionManager {
     /// Like [`send`](Self::send) but routing the broadcast per `opts` (public mempool or a
     /// private relay). The route is validated up front and persisted on the handle so bumps
     /// and crash-recovery re-send on the original route.
+    pub async fn send_with(
+        &self,
+        intent: &TxIntent,
+        opts: &SubmissionOpts,
+    ) -> Result<TxHandle, TransactionManagerError> {
+        self.send_with_meta(intent, opts, None).await
+    }
+
+    /// The send pipeline, optionally stamping `meta` (a gasless forwarder `execute()`). A plain
+    /// send passes `None`; the self-relay path passes the forwarder/signer/nonce so the
+    /// relayer's executor honors the confirmation-safety decode. The account signing the tx is
+    /// this manager's signer, so a gasless outer tx is sent by the *relayer* manager, whose
+    /// signer is the relayer — no per-tx signer selection.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
             name = "wallet.send",
             level = "info",
             skip_all,
-            fields(intent_hash = ?intent.hash(), account = %intent.account, chain_id = intent.chain_id)
+            fields(intent_hash = ?intent.hash(), account = %intent.account, chain_id = intent.chain_id, gasless = meta.is_some())
         )
     )]
-    pub async fn send_with(
+    pub(crate) async fn send_with_meta(
         &self,
         intent: &TxIntent,
         opts: &SubmissionOpts,
+        meta: Option<MetaContext>,
     ) -> Result<TxHandle, TransactionManagerError> {
         // Fail fast (before any nonce or chain touch) if the strategy can't honor the route.
         if !self.submission.supports_route(&opts.route) {
@@ -205,8 +222,149 @@ impl TransactionManager {
         debug!(nonce, "nonce allocated");
         // `build_sign_submit` owns the nonce lifecycle: it recycles the nonce only when
         // nothing was broadcast, so a live tx's nonce is never freed for reuse.
-        self.build_sign_submit(intent, gas_limit, fees, nonce, approval, opts)
+        self.build_sign_submit(intent, gas_limit, fees, nonce, approval, opts, meta)
             .await
+    }
+
+    /// The account this manager signs transactions for (its signer's address).
+    pub(crate) fn account(&self) -> Address {
+        self.signer.address()
+    }
+
+    /// Current wall-clock (unix seconds) from the injected clock — for building a request's
+    /// absolute deadline at send time.
+    pub(crate) fn now_unix(&self) -> u64 {
+        self.clock.now_unix()
+    }
+
+    /// Persist a task-pending handle for a managed-relay (Gelato) send under the **user** account.
+    /// The relay submits and pays, so this handle carries no signed bytes and no on-chain hash
+    /// yet — the user's executor polls `meta.task` to inclusion, then confirms it at depth. The
+    /// `envelope` is the default ceiling (never bumped: we do not resubmit a relay-owned tx).
+    pub(crate) async fn persist_task_handle(
+        &self,
+        intent: &TxIntent,
+        meta: MetaContext,
+    ) -> Result<TxHandle, TransactionManagerError> {
+        let intent_hash = intent.hash();
+        let nonce = meta.nonce.saturating_to::<u64>();
+        let handle = TxHandle {
+            id: HandleId::new(intent_hash, nonce),
+            account: intent.account,
+            intent: intent.clone(),
+            intent_hash,
+            nonce,
+            status: TxStatus::Sent,
+            envelope: GasEnvelope::DEFAULT,
+            signed: Bytes::new(),
+            broadcasts: vec![],
+            last_broadcast_at: self.clock.now_unix(),
+            cancelled: false,
+            submission: SubmissionOpts::default(),
+            meta: Some(meta),
+        };
+        self.state_store.put_handle(&handle).await?;
+        Ok(handle)
+    }
+
+    /// Read the forwarder's current nonce for `owner` (sequential replay protection). A revert
+    /// or an undecodable return means the address is not a conforming `ERC2771Forwarder`.
+    pub(crate) async fn forwarder_nonce(
+        &self,
+        forwarder: Address,
+        owner: Address,
+    ) -> Result<U256, RelayError> {
+        let request = TransactionRequest {
+            to: Some(TxKind::Call(forwarder)),
+            input: TransactionInput::new(nonces_calldata(owner)),
+            ..Default::default()
+        };
+        match self.rpc.call(&request).await? {
+            Simulated::Returned(bytes) => {
+                decode_forwarder_nonce(&bytes).ok_or_else(|| RelayError::Forwarder {
+                    message: "nonces() returned undecodable data — not an ERC2771Forwarder".into(),
+                })
+            }
+            Simulated::Reverted(_) => Err(RelayError::Forwarder {
+                message: "nonces() reverted — the address is not an ERC2771Forwarder".into(),
+            }),
+        }
+    }
+
+    /// Build the user's [`ForwardRequest`] for `intent` bound to `forwarder`, and sign it through
+    /// the **existing** policy gate as EIP-712 typed data. The gasless analog of building and
+    /// signing a tx: the user authorizes (and pays nothing), but never sends — a relayer does.
+    /// `deadline` is the validity window from now. Returns `WalletKitError` because it fuses two
+    /// domains: the forwarder read ([`RelayError`]) and the signing gate ([`TransactionManagerError`]).
+    /// `skip_all` keeps the request payload out of telemetry; only correlating identifiers are recorded.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "wallet.gasless.build",
+            level = "debug",
+            skip_all,
+            fields(intent_hash = ?intent.hash(), account = %intent.account, forwarder = %forwarder, chain_id = intent.chain_id)
+        )
+    )]
+    pub(crate) async fn build_and_sign_forward_request(
+        &self,
+        intent: &TxIntent,
+        forwarder: Address,
+        domain: &ForwarderDomain,
+        deadline: Duration,
+    ) -> Result<SignedRequest, WalletKitError> {
+        let owner = intent.account;
+        let target = match intent.to {
+            TxKind::Call(to) => to,
+            TxKind::Create => {
+                return Err(RelayError::Rejected {
+                    message: "contract creation cannot be relayed via ERC-2771".into(),
+                }
+                .into());
+            }
+        };
+        let nonce = self.forwarder_nonce(forwarder, owner).await?;
+        // The inner call's gas, estimated as the user calling the target directly (the same
+        // `msg.sender` the forwarder reproduces). A deterministic revert ⇒ the request would fail.
+        let inner = TransactionRequest {
+            from: Some(owner),
+            to: Some(intent.to),
+            value: Some(intent.value),
+            input: TransactionInput::new(intent.input.clone()),
+            ..Default::default()
+        };
+        let gas = match self.rpc.estimate_gas(&inner).await {
+            Ok(gas) => gas,
+            Err(RpcError::Call {
+                transient: false,
+                message,
+            }) => return Err(WalletKitError::Simulation { reason: message }),
+            Err(e) => return Err(RelayError::from(e).into()),
+        };
+        // uint48 deadline; clamp so a far-future window can never panic the conversion.
+        const U48_MAX: u64 = (1u64 << 48) - 1;
+        let deadline = self
+            .clock
+            .now_unix()
+            .saturating_add(deadline.as_secs())
+            .min(U48_MAX);
+        let request = ForwardRequest {
+            from: owner,
+            to: target,
+            value: intent.value,
+            gas: U256::from(gas),
+            nonce,
+            deadline: U48::from(deadline),
+            data: intent.input.clone(),
+        };
+        let typed = request.typed_data(forwarder, intent.chain_id, domain);
+        let signature = self.sign_typed_data(&typed).await?;
+        Ok(SignedRequest::new(
+            request,
+            signature,
+            forwarder,
+            intent.chain_id,
+        ))
     }
 
     /// Cancel a pending tx: a policy-gated 0-value self-send at its nonce (RBF). Errors if
@@ -274,6 +432,8 @@ impl TransactionManager {
             // The cancel rides the same route as the tx it replaces (a private tx's cancel
             // stays private).
             submission: target.submission.clone(),
+            // A cancel is a plain self-send, never a gasless meta-tx.
+            meta: None,
         };
         self.state_store.put_handle(&cancel).await?;
         info!(nonce = target.nonce, "cancel submitted");
@@ -323,6 +483,7 @@ impl TransactionManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn build_sign_submit(
         &self,
         intent: &TxIntent,
@@ -331,6 +492,7 @@ impl TransactionManager {
         nonce: u64,
         approval: PolicyApproval,
         opts: &SubmissionOpts,
+        meta: Option<MetaContext>,
     ) -> Result<TxHandle, TransactionManagerError> {
         let account = intent.account;
         let intent_hash = intent.hash();
@@ -360,6 +522,8 @@ impl TransactionManager {
             last_broadcast_at: now,
             cancelled: false,
             submission: opts.clone(),
+            // Present only on the self-relay path — drives the relayer executor's confirm decode.
+            meta,
         };
         // Persist the signed tx before broadcast (WAL). A pre-broadcast persist failure
         // means nothing was sent -> recycle the nonce.
@@ -652,5 +816,26 @@ mod tests {
             tm.cancel(done.id).await,
             Err(TransactionManagerError::CancelTerminal)
         ));
+    }
+
+    // --- gasless (J) ---
+
+    #[tokio::test]
+    async fn forwarder_nonce_rejects_a_reverting_address_as_not_a_forwarder() {
+        // A `nonces()` that reverts (or returns junk) means the configured address isn't a
+        // conforming forwarder — a terminal config error, not a transient read. (The happy
+        // read + field mapping are covered by the facade self-relay test and the anvil parity
+        // test against a real forwarder.)
+        let tm = Harness::default()
+            .rpc(Arc::new(MockRpc {
+                call_reverts: true,
+                ..Default::default()
+            }))
+            .manager();
+        let err = tm
+            .forwarder_nonce(Address::repeat_byte(0xfe), Address::ZERO)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RelayError::Forwarder { .. }));
     }
 }

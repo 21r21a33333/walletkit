@@ -19,6 +19,12 @@ pub mod transport;
 /// Shared Multicall3 batching primitive used by the read adapter (and, later, preview).
 pub(crate) mod multicall;
 
+/// Shared HTTP response triage reused by the relay-posting adapters (private submission, gasless).
+pub(crate) mod http;
+
+/// Managed relay adapters (Gelato) implementing the [`Relay`](crate::core::deps::Relay) port.
+pub mod relay;
+
 pub use accounts::AccountManager;
 pub use clock::SystemClock;
 pub use ens::RpcEnsResolver;
@@ -27,6 +33,7 @@ pub use nonce::LocalNonceManager;
 #[cfg(feature = "pricing")]
 pub use pricing::{ChainlinkPrice, FeedConfig, TokenListSource};
 pub use read::RpcReadClient;
+pub use relay::GelatoRelay;
 pub use signers::LocalSigner;
 pub use store::InMemoryStateStore;
 #[cfg(feature = "postgres")]

@@ -1,4 +1,4 @@
-use super::{GasEnvelope, IntentHash, TxIntent};
+use super::{GasEnvelope, IntentHash, MetaContext, TxIntent};
 use crate::core::deps::SubmissionOpts;
 use alloy_primitives::{Address, B256, Bytes, TxHash, keccak256};
 use serde::{Deserialize, Serialize};
@@ -115,4 +115,9 @@ pub struct TxHandle {
     /// after a restart. Absent in legacy records ⇒ `Public`.
     #[serde(default)]
     pub submission: SubmissionOpts,
+    /// Present iff this is a gasless forwarder `execute()` tx. Drives the confirm-safety decode
+    /// of `ExecutedForwardRequest`: a mined outer tx whose inner call reverted settles `Failed`,
+    /// never `Confirmed`. Absent in legacy/non-gasless records ⇒ a normal tx.
+    #[serde(default)]
+    pub meta: Option<MetaContext>,
 }

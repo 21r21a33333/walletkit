@@ -72,6 +72,45 @@ silently leaks to the public mempool. `Escalation::PublicAfter { cycles }` opts 
 persisted fallback to public if a tx won't land; `StayPrivate` keeps retrying privately.
 Without a relay identity, a private send fails cleanly (before signing) rather than leaking.
 
+## Gasless meta-transactions (ERC-2771)
+
+Let a user transact **without holding ETH**: they sign a free request (no gas, no nonce spent),
+a third party submits it and pays, and the target still sees the *user* as `_msgSender()`. Choose
+a backend when you build the wallet; the send call is the same either way and returns a tracked
+`TxHandle` you confirm with `wallet.tick()`:
+
+```rust
+// Self-relay: you operate a funded relayer account (Model 1) that submits, pays, and is tracked
+// as its own account. Bind requests to your ERC-2771 forwarder.
+let wallet = Wallet::builder(rpc, user_signer, policy)
+    .relayer(relayer_signer)
+    .forwarder(forwarder_addr)
+    .build();
+wallet.send_gasless(&intent, SelfRelay::new()).await?;
+// Compose with private submission — the outer execute() rides Flashbots:
+wallet.send_gasless(&intent, SelfRelay::via(Flashbots::new(Escalation::StayPrivate))).await?;
+
+// Managed relay: Gelato submits and pays; register the sponsor key once, at build time.
+let wallet = Wallet::builder(rpc, user_signer, policy)
+    .gelato(Gelato::sponsored(api_key))      // or Gelato::sync_fee(fee_token); add .concurrent()
+    .build();
+wallet.send_gasless(&intent, GaslessOpts::gelato()).await?;
+```
+
+**Confirmation is honest** — a meta-tx settles `Confirmed` only when the inner call actually ran
+(self-relay decodes the forwarder's `ExecutedForwardRequest`; Gelato records the on-chain hash
+only on an `ExecSuccess` verdict, then depth-confirms it). A mined-but-reverted meta-tx settles
+`Failed`, never a false `Confirmed`. A gasless send with no backend configured fails cleanly
+(`RelayError::NotConfigured`) before signing.
+
+**Policy still gates it — it is not a bypass.** The request is authorized by signing it as EIP-712
+typed data through your existing `PolicyEngine`. Because it arrives as typed data (not a
+`TxIntent`), the predicate that applies is `TypedDataDomainAllowlist`: your policy must allow the
+forwarder's `verifyingContract`, or the default-deny engine rejects the send. For Gelato that is
+one of its four `GelatoRelay*ERC2771` forwarders (per fee model × nonce mode). Note this allowlists
+the *forwarder*, not the inner call — per-target/-value limits on gasless requests are a later
+policy slice.
+
 ## RPC layer — eRPC recommended
 
 walletkit's `Transport` reuses alloy's transport layers (retry/backoff + multi-endpoint
