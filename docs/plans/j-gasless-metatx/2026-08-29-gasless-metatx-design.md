@@ -3,6 +3,18 @@
 **Sub-project:** J (the second slice of Phase 2 — separate *who authorizes* a tx from *who
 pays* for it, via ERC-2771 meta-transactions). **Date:** 2026-08-29. **Status:** designed.
 
+> **Revision 2026-08-30 (post-Phase-1, research-backed).** Implementing Phase 2 surfaced that
+> the outer `execute()` tx runs under the **relayer** account, which the per-account
+> `AccountExecutor` (`self.account`, `debug_assert(signer==account)`, `pending_handles(self.account)`)
+> structurally cannot track. The original "reuse the send pipeline with a swapped signer"
+> assumption is unworkable. A citation-backed survey (OZ Defender Relayer, thirdweb Engine,
+> OpenGSN, Safe, viem/ethers, ERC-4337) shows every self-operated relayer is a **distinct EOA
+> with its own per-account tx lifecycle**. This design now adopts **Model 1: the relayer is a
+> second operated account** (a second `TransactionManager` + `AccountExecutor`), sending and
+> tracking the outer tx with **zero core refactor**. The relayer's outer tx runs under a
+> **configurable policy (default `AllowAll`)** — the user's request is already policy-gated on
+> its own signing path. See §2, §6, §7, §11, and the research note at the end.
+
 ## 1. Goal & scope
 
 Let a user execute an action **without holding ETH**: the user signs an EIP-712
@@ -51,6 +63,41 @@ the **forwarder** nonce is consumed instead. Folding this into `SubmissionRoute`
 the port's contract (it has no raw user tx to broadcast). So gasless is a **sibling** of
 `send_with`, not a route under it — `send_gasless`. It *reuses* the submission layer for the
 **outer** tx (self-relay), which is where I and J compose.
+
+## 2a. Self-relay tracking: the relayer is a second operated account (Model 1)
+
+The outer `execute()` tx is **sent and paid for by the relayer**, not the user. Our tracking
+loop is per-account by construction — an `AccountExecutor` is bound to one `account` and only
+ever reads `pending_handles(self.account)` / `tx_count(self.account)`, asserting
+`signer.address() == account`. So the user's executor **cannot** track, confirm, or bump a tx
+whose sender is the relayer. Threading a second signer into the user's manager does not help:
+the outer handle still lives under the relayer account, which the user's executor never queries.
+
+**Resolution — the relayer is just a second operated account.** When `relayer(signer)` +
+`forwarder(addr)` are configured, the `Wallet` builds a **second** `TransactionManager` +
+`AccountExecutor` bound to the relayer address, and `tick()` drives **both**. The outer tx is
+sent through the *relayer's* manager and tracked/confirmed/bumped by the *relayer's* executor —
+which already honors `handle.meta`, so Phase-1's confirmation-safety works **unchanged**. This
+is pure composition: **no change to the core send/track/confirm code**, only a second instance
+of it. The two accounts have clean roles:
+
+| Role | Account | What it does | Nonce consumed |
+| --- | --- | --- | --- |
+| **Authorizer** | user | signs the EIP-712 `ForwardRequest` through the existing policy gate; **never sends** | the **forwarder** nonce (`nonces(user)`) |
+| **Payer** | relayer | sends + tracks the outer `execute()` tx via its own manager/executor | the relayer's **account** nonce |
+
+This matches every self-operated production relayer (each runs its sending EOA as a
+first-class, independently-tracked account) and the viem/ethers "one nonce-manager per operated
+account" idiom (see the research note). It also generalizes: the payer≠authorizer seam is the
+same split ERC-4337 draws between a bundler and a smart account, so a future 4337 backend slots
+in behind the same `Relay` port. Managed Gelato (§6) needs no second account at all — it *is*
+the outsourced payer; its handle is task-backed, resolved by `poll`.
+
+**Relayer policy (configurable, default `AllowAll`).** The relayer's outer tx runs under its own
+policy engine, **permissive by default**: the user's request was already authorized on its own
+signing path, and the relayer's spend is infrastructure, not a user action, so re-applying the
+*user's* limits to it is semantically wrong. `WalletBuilder::relayer_policy(..)` lets an operator
+cap the relayer (e.g. a per-tx value ceiling) when they want to; absent that, `AllowAll`.
 
 ## 3. Vocabulary alignment
 
@@ -193,16 +240,24 @@ sol! {
 
 Mirrors `adapters/submission/` (a `mod.rs` re-export + one file per family).
 
-**`SelfRelay` adapter — maximal reuse.** Holds the relayer `Signer`, the `SubmissionStrategy`
-(I's `Router`), the `GasOracle`, and `Rpc`. `relay()`:
-1. Compose `execute(request_data)` calldata (`sol!` `encode`), value = `request.value`.
-2. Build the **outer** `TxIntent { account: relayer, to: forwarder, value, input }`, and send
-   it through the **existing** `send_with` pipeline (nonce = relayer's tx nonce, fees from
-   `GasOracle`, signed by the relayer, broadcast via `submission` — private-route-capable),
-   which **persists and tracks** the outer `TxHandle` exactly like any send.
-3. Attach `meta` (§7) to that handle and return it. The executor then owns bump/resubmit/
-   confirm — self-relay inherits **all** of it (this *is* the "relayer auto-resubmission"
-   other services advertise). Persistence stays in the reused send path, not the adapter.
+**`SelfRelay` adapter — maximal reuse (Model 1).** Holds the **relayer's own
+`TransactionManager`** (the second operated account's full pipeline: relayer signer, nonce
+manager, gas oracle, submission `Router`, state store — configured with the relayer policy) and
+the `forwarder` address. `relay(signed)`:
+1. Compose `execute(request_data)` calldata (`sol!` `encode`) from `signed.request` +
+   `signed.signature`; value = `request.value`.
+2. Build the **outer** `TxIntent { account: relayer, to: forwarder, value, input }` and send it
+   through the relayer manager's **existing** send path (nonce = relayer's account nonce, fees
+   from its `GasOracle`, signed by the relayer, broadcast via `submission` —
+   private-route-capable), which **persists** the outer `TxHandle` under the relayer account,
+   stamping `meta` (§7) at build time so the confirm-safety decode is present from the first
+   persist (a `send_with` variant that carries an optional `meta`, default `None` for a normal
+   send). No signer threading, no account-match bypass — the relayer manager's signer *is* the
+   relayer.
+3. Return that handle. The **relayer's** `AccountExecutor` (ticked alongside the user's) then
+   owns bump/resubmit/confirm — self-relay inherits **all** of it (this *is* the "relayer
+   auto-resubmission" other services advertise). Persistence + tracking stay in the reused core,
+   not the adapter.
 
 **`Gelato` adapter — HTTP.** Reuses the `reqwest::Client` from I. `relay()` POSTs
 `{chainId, target, data, user, userNonce?/salt, userDeadline, sponsorApiKey|feeToken}` +
@@ -237,22 +292,34 @@ pub struct MetaContext {
 }
 ```
 
-**Confirmation safety — the crux (H extension).** When `meta.is_some()` and the outer tx has
-a receipt, confirm decodes `ExecutedForwardRequest(signer, nonce, success)` from the logs
-(`sol!` event decode, matched on `signer`/`nonce`):
-- event present, `success == true` → `Confirmed`.
-- event present, `success == false` → **`Failed`** (forwarder ran, inner call reverted, nonce
-  consumed) — the meta-tx equivalent of H's "no false `Confirmed`". A naive `Confirmed` on the
-  mined outer tx would report success the user never got.
-- event absent (outer tx reverted before `execute` ran) → `Failed`.
+**Confirmation safety — the crux (H extension).** When `meta.is_some()` and the outer tx has a
+receipt, confirm decodes `ExecutedForwardRequest(signer, nonce, success)` from the logs (`sol!`
+event decode, matched on `signer`/`nonce`):
+- receipt **reverted** → `Failed` — H's existing logic already settles this, no meta decode
+  needed. **This is the single-`execute()` failure path:** OZ `ERC2771Forwarder` v5.x reverts
+  the outer tx when the inner call fails (or the request is invalid/expired), so a failed
+  single meta-tx surfaces as a plain reverted receipt.
+- receipt succeeded **and** a matching `ExecutedForwardRequest(signer, nonce, success == true)`
+  is present → `Confirmed`.
+- receipt succeeded but the matching event is **absent** (or `success == false`) → **`Failed`**.
+  The `success == false`-on-a-*mined* outer tx case cannot arise for single `execute()` (it
+  reverts); it is emitted only by `executeBatch()` (deferred, §1 OUT). We keep the guard anyway
+  as forward-compatible defense and to reject a mined outer tx that did *not* actually execute
+  our request — the meta-tx equivalent of H's "no false `Confirmed`".
 
-This slots into the existing confirm path — the hash-anchoring and reorg-safety H proved are
-route- and mechanism-agnostic; J only adds the log decode for the `meta` case.
+So for the J scope (single `execute()`) the honest-confirm is: revert ⇒ `Failed` (free, via H);
+success ⇒ require the matching `success=true` event before `Confirmed`. This slots into the
+existing confirm path unchanged — hash-anchoring and reorg-safety are mechanism-agnostic; J adds
+only the log decode for the `meta` case, and it runs inside the **relayer's** executor (the one
+tracking the outer tx).
 
-**Managed-relay tracking** (Gelato, no synchronous hash): the runner's confirm tick, for a
-handle with `meta.task = Some(..)` and no tx hash yet, calls `Relay::poll`; on
+**Managed-relay tracking** (Gelato, no operated relayer account, no synchronous hash): the
+Gelato handle is persisted under the **user** account (the authorizer) with `meta.task = Some(..)`
+and no tx hash, so the **user's** executor tick picks it up, calls `Relay::poll`; on
 `Included(hash)` it records the hash and the normal chain-confirm (+ the decode above) takes
 over; on `Failed` it settles `Failed`. No new loop — an extra branch in the existing tick.
+(Self-relay differs: its handle lives under the relayer account and is polled trivially —
+`poll` defaults to `Settled` since the outer hash is already known.)
 
 ## 8. Policy, secrets, and error taxonomy
 
@@ -319,14 +386,18 @@ test (hermetic — no external endpoints). Each ships its exact single-test `car
   `adapters/relay/{mod,self_relay,gelato}.rs`, `tests/gasless.rs`, test-support relay/forwarder
   stubs.
 - **Changed:** `core/wallet/primitives/handle.rs` (+`meta`), `core/wallet/primitives/mod.rs`
-  (exports), `core/wallet/executor/mod.rs` (confirm decode + task-poll branch),
-  `core/wallet/transaction_manager.rs` (`send_gasless` orchestration reusing `send_with` for
-  the outer tx), `facade.rs` (`relayer`, `forwarder`, `send_gasless`, adapter wiring),
-  `error.rs` (`Relay` variant + `kind()`), `adapters/mod.rs` (module wiring), `testutils.rs`
-  (relay mock).
+  (exports), `core/wallet/executor/mod.rs` (confirm decode + task-poll branch — used by the
+  relayer's executor for self-relay and the user's for Gelato),
+  `core/wallet/transaction_manager.rs` (build-sign of the `ForwardRequest` on the user manager +
+  an internal `meta`-carrying send used by the relayer manager for the outer tx; `send`/`send_with`
+  keep their public signatures and behavior), `facade.rs` (`relayer`, `forwarder`,
+  `relayer_policy`; **build a second `TransactionManager` + `AccountExecutor` for the relayer
+  account and `tick()` both**; `send_gasless` orchestration + adapter wiring), `error.rs`
+  (`Relay` variant + `kind()`), `adapters/mod.rs` (module wiring), `testutils.rs` (relay mock).
 - **No `Cargo.toml` change** — reuse `reqwest`, `alloy sol!`/`sol-types`/`dyn-abi`, `serde`.
-- **Behavior-preserving:** no relayer/forwarder configured ⇒ nothing changes; `send`/`send_with`
-  untouched; pre-J handles deserialize with `meta = None`.
+- **Behavior-preserving:** no relayer/forwarder configured ⇒ a `Wallet` is exactly as before
+  (one account, one executor); `send`/`send_with` byte-identical; pre-J handles deserialize with
+  `meta = None`. The second account/executor exists **only** when a relayer is configured.
 
 ## 11. Open risks / plan-time gates
 
@@ -334,12 +405,14 @@ test (hermetic — no external endpoints). Each ships its exact single-test `car
    `alloy 2.4.1`; the whole struct/domain/event/ABI surface is already provided by `alloy`
    `sol!` (the *same* reuse we lean on in `read`/`multicall`). Hand-rolling would re-encode
    EIP-712 by hand — rejected. Verdict: `sol!` + `sol-types` + `dyn-abi::TypedData::from_struct`.
-2. **Outer-tx signing identity.** Self-relay must sign the outer `execute` with the **relayer**
-   key, not the account key. Minimal seam **without a new field**: `meta.is_some()` *already*
-   marks a gasless outer tx, so the executor selects the relayer signer exactly when
-   `meta.is_some()` (else the account signer) — the same discriminator drives both the sign and
-   the confirm decode (DRY). Bounded change to `transaction_manager`'s single-signer
-   assumption (add `relayer: Arc<dyn Signer>`, pick by `meta`), not a rewrite.
+2. **Outer-tx signing + tracking identity (resolved: Model 1, §2a).** Self-relay's outer
+   `execute` must be signed **and tracked** under the relayer account. An earlier idea —
+   thread a relayer signer into the user's manager and pick it when `meta.is_some()` — is
+   **rejected**: it fixes signing but not tracking (the user's per-account executor never
+   queries the relayer's handles), and it bypasses the `signer==account` invariant. Instead the
+   relayer is a **second operated account**: its own `TransactionManager` (relayer signer,
+   configurable policy) + `AccountExecutor`, both driven by `Wallet::tick()`. Zero core change,
+   the `signer==account` invariant holds for both accounts, and confirm-safety is inherited.
 3. **`meta` round-trips** across all three `StateStore` backends — covered by the confirm tests
    over real persistence.
 4. **Gelato wire format** (exact field names, salt encoding, status enum strings) is pinned at
@@ -352,3 +425,35 @@ test (hermetic — no external endpoints). Each ships its exact single-test `car
 slice); ERC-4337 UserOps / OpenGSN staking / raw non-2771 relaying; 1Balance deposit
 management; a generic multi-backend `ExecutionBackend` abstraction (J ships two concrete
 families; the abstraction earns its place only when a third backend appears).
+
+## 13. Research note — how production relayers model the sender (2026-08-30)
+
+Surveyed before adopting Model 1; every **self-operated** relayer models its sender as a
+distinct EOA with its own per-account tx lifecycle (nonce, RBF, confirmation), never one
+account-agnostic loop. Only a **fully-outsourced** relay (Gelato) hides the sender behind a
+task id — which is exactly our Gelato adapter, not self-relay.
+
+| System | Relayer = separately-tracked account? | Source |
+| --- | --- | --- |
+| OZ Defender Relayer | Yes — dedicated EOA; own nonce/RBF/resubmission | <https://docs.openzeppelin.com/defender/module/relayers> |
+| thirdweb Engine | Yes — "backend wallets", endpoints scoped `/{chain}/{walletAddress}/` | <https://portal.thirdweb.com/changelog/engine-nonce-management-improvements> |
+| OpenGSN | Yes — RelayWorker EOAs, "each worker independent with its nonce mgmt" | <https://github.com/opengsn/gsn/issues/232> |
+| Safe relay service | Yes — relayer EOA submits `execTransaction` | <https://github.com/5afe/safe-relay-service> |
+| Gelato Relay | No — outsourced; poll a `taskId` (`getTaskStatus`) | <https://docs.gelato.cloud/web3-services/relay/relay-api> |
+| ERC-4337 (contrast) | Bundler submits ≠ account authorizes; tracked by userOpHash | <https://eips.ethereum.org/EIPS/eip-4337> |
+
+Client-lib idiom: viem attaches a `nonceManager` **per local account**
+(<https://viem.sh/docs/accounts/local/createNonceManager>); ethers' `NonceManager` wraps a
+single signer. "One nonce-manager per operated account" is the norm — Model 1 mirrors it.
+
+OZ `ERC2771Forwarder` v5.1.0 (source-confirmed,
+<https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v5.1.0/contracts/metatx/ERC2771Forwarder.sol>):
+`event ExecutedForwardRequest(address indexed signer, uint256 nonce, bool success);`. Single
+`execute()` **reverts** on inner failure; only `executeBatch()` emits `success=false` on a mined
+tx. `_checkForwardedGas` prevents relayer gas-griefing, so a `success=false` is a genuine
+app-level revert. Drives §7's confirm rule.
+
+**Forward-compat:** Model 1's payer≠authorizer seam is the same split ERC-4337 draws between a
+bundler and a smart account; a future 4337 backend fits behind the `Relay` port, provided
+`TxHandle` stays an **opaque status token** (outer hash / taskId / userOpHash) — the thirdweb/
+Gelato lesson.

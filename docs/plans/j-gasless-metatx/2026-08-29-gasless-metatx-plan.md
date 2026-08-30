@@ -20,6 +20,14 @@ anvil with a deployed OZ `ERC2771Forwarder`.
 review — the same cadence as I. Hard dependency chain: 1 (build+sign+honest-confirm spine) →
 2 (self-relay makes it real, proven on anvil) → 3 (managed relay + docs + PR).
 
+> **Revision 2026-08-30 — Phase 2 rewritten for Model 1 (see design §2a, §13).** Phase 1's
+> assumption that self-relay could "reuse the send pipeline" via signer-threading is unworkable:
+> the per-account `AccountExecutor` can't track a tx sent by the relayer. Research-backed
+> resolution: **the relayer is a second operated account** — its own `TransactionManager` +
+> `AccountExecutor`, both driven by `Wallet::tick()`, under a **configurable policy (default
+> `AllowAll`)**. Phase 2's steps below reflect this; the old "add `relayer: Arc<dyn Signer>`,
+> pick by `meta.is_some()`" seam is dropped. Phases 1 and 3 are unchanged in shape.
+
 ## Global constraints
 
 - **Minimal-LOC / reuse-first (the user's explicit ask):** every step names the library
@@ -137,40 +145,84 @@ nothing broadcasts yet. Everything downstream plugs into this. Ends in one revie
 
 **Component:** a real gasless tx via self-relay — built, user-signed, relayer-submitted,
 tracked, and **confirmed honestly on anvil**, composing with I's private routes. The feature
-works. Ends in one review.
+works. Ends in one review. **Model 1:** the relayer is a second operated account (design §2a).
 
-**Reuse:** the existing `send_with` pipeline for the **outer** tx (nonce/gas/sign/persist/
-submit/bump/confirm — the "auto-resubmission" for free); I's `Router`/`SubmissionStrategy`
-(private-route composition); `GasOracle`; the H `FaultRpc` harness + anvil.
+**Reuse:** a **second `TransactionManager` + `AccountExecutor`** (the relayer account) — the
+existing send/track/confirm core, instantiated again, unchanged; its `send_with` pipeline for
+the **outer** tx (nonce/gas/sign/persist/submit/bump/confirm — "auto-resubmission" for free);
+I's `Router`/`SubmissionStrategy` (private-route composition); `GasOracle`; the existing signing
+gate + `Signer::sign_typed_data` for the request; the H `FaultRpc` harness + anvil.
 
-**Files:** `adapters/relay/{mod,self_relay}.rs` (new), `adapters/mod.rs`,
-`core/wallet/transaction_manager.rs`, `facade.rs`, `testutils.rs`, `tests/gasless.rs` (new),
-`tests/support/mod.rs`.
+**Files:** `core/wallet/transaction_manager.rs` (build-sign spine + read helpers + internal
+`meta`-carrying send), `adapters/relay/{mod,self_relay}.rs` (new), `adapters/mod.rs`,
+`facade.rs` (second manager/executor + `relayer`/`forwarder`/`relayer_policy` + `send_gasless`),
+`testutils.rs`, `tests/gasless.rs` (new), `tests/support/mod.rs`.
 
-- [ ] **Step 1 — `SelfRelay` adapter (design §6):** holds the relayer `Signer`,
-  `Arc<dyn SubmissionStrategy>` (I's Router), `GasOracle`, `Rpc`. `relay()`: compose
-  `execute(request_data)` calldata (`sol!` `encode`), build the outer `TxIntent`
-  (`account = relayer`, `to = forwarder`, `value = request.value`), submit via the reused send
-  path, attach `meta`, return the handle. `poll` = default (`Settled`).
-- [ ] **Step 2 — `send_gasless` orchestration (design §4/§7):** in `transaction_manager` —
-  build `ForwardRequest` (nonce/gas/deadline), authorize+sign it via the existing gate
-  (`SigningRequest::TypedData` + `Signer::sign_typed_data`, **user** signer), hand `SignedRequest`
-  to `relay.relay()`. **Outer-tx signing identity (risk §2, DRY):** add `relayer: Arc<dyn Signer>`
-  to the manager/executor and select it exactly when `meta.is_some()` (else the account signer) —
-  the *same* discriminator that drives the confirm decode, so no new handle field. Bumps re-sign
-  by the same rule.
-- [ ] **Step 3 — facade (design §10):** `WalletBuilder::relayer(PrivateKeySigner)` +
-  `forwarder(Address)`; when both set, wire the `SelfRelay` adapter. `Wallet::send_gasless(
-  intent, impl Into<GaslessOpts>)`. `send_gasless` with no relayer/forwarder → clean
-  `WalletKitError` (never a panic), before any signing.
+> **Implementation status (2026-08-30) — slice A DONE (uncommitted), anvil parity DEFERRED to
+> slice B.** Built the self-relay path end-to-end, unit-proven, gate-green (fmt · clippy 0-warn
+> ×2 · 133 lib tests · rustdoc `-D warnings`). **Deviations discovered while building, all
+> deliberate:**
+> - **No `adapters/relay/` for self-relay (option b).** The Phase-1 `RelayError` taxonomy
+>   (`Submission`/`Signing`/`Forwarder`/`Rejected`) was shaped for an adapter that *broadcasts*;
+>   under Model 1 the outer tx runs through the relayer's **full pipeline**, whose error surface
+>   is `TransactionManagerError` (nonce/gas/policy/store/…) — far richer than `RelayError` can
+>   hold without lossy mapping. So the **facade orchestrates** self-relay directly over the
+>   relayer manager (errors stay `WalletKitError`). The `Relay` port/`SignedRequest`/`RelayStatus`
+>   remain the public seam and get their first concrete impl in **Phase 3 (Gelato)**, where the
+>   HTTP error surface *is* `RelayError`-shaped.
+> - **`build_and_sign_forward_request` lives on the user manager, returns `WalletKitError`** (it
+>   fuses the forwarder read + the signing gate). Reuses the existing `sign_typed_data` gate.
+> - **`relayer(Arc<dyn Signer>)`** (not `PrivateKeySigner`) — consistent with `builder(signer)`
+>   and testable with the mock signer.
+> - **`verify()` deferred to Phase 3** (YAGNI — its only consumer is the Phase-3 preflight; a
+>   generated-but-unused `sol!` `verify` would trip the zero-warning gate). Only `nonces`/
+>   `execute`/`ForwardRequestData` were added now (each has a consumer).
+> - **No refill on the relayer executor** — re-relaying a displaced gasless outer tx is out of
+>   scope for this cut (YAGNI).
+> - **Signature encoding (`SignatureEnvelope::as_bytes()`) is unverified on-chain yet** — the mock
+>   tests don't recover it; the **anvil parity test (slice B) must confirm** the `v`-byte form the
+>   OZ forwarder's `ECDSA.recover` expects (27/28 vs 0/1), adjusting the encode if needed.
+> - **Tests trimmed to earn their place:** dropped a `meta`-stamping (struct-init) and a
+>   field-mapping (struct-init) test; kept `forwarder_nonce`-revert (error path),
+>   `send_gasless`-not-configured (guard), and the self-relay happy path (orchestration).
+
+- [ ] **Step 1 — build-sign spine + read helpers + `meta`-carrying send (design §5/§7; the
+  moved Phase-1 Step 2).** In `transaction_manager.rs`: (a) the `sol!` `nonces`/`verify`/
+  `execute`/`ForwardRequestData` call types (first consumer is now); (b) `forwarder_nonce`
+  (`nonces(from)`) and `verify(request)` sharing one call+decode helper (DRY), inner `gas` via
+  `Rpc::estimate_gas`, deadline = `now + Deadline`; (c) `build_and_sign_forward_request(intent,
+  forwarder, chain_id, deadline) -> SignedRequest` — build `ForwardRequest`, `TypedData::from_struct`,
+  authorize+sign through the **existing** gate with the **user** signer; (d) an internal
+  `meta`-carrying send (`send_with` keeps its public signature and delegates with `meta = None`;
+  a private `send_with_meta(intent, opts, meta)` stamps `meta` on the handle at build time). All
+  fallible returns are `WalletKitError`; helpers map to `RelayError` at the call site.
+- [ ] **Step 2 — `SelfRelay` adapter (design §6).** Holds the **relayer's `TransactionManager`**
+  and the `forwarder` address. `relay(signed)`: compose `execute(request_data)` calldata (`sol!`
+  `encode`) from `signed.request` + `signed.signature`; build the outer `TxIntent { account =
+  relayer, to = forwarder, value = request.value, input }`; send via the relayer manager's
+  `meta`-carrying path (stamping `MetaContext { forwarder, signer, nonce }`); return the handle.
+  `poll` = default (`Settled`) — the outer hash is already known. No signer threading; the
+  relayer manager's signer *is* the relayer.
+- [ ] **Step 3 — facade + orchestration (design §2a/§10).** `WalletBuilder::relayer(
+  PrivateKeySigner)` + `forwarder(Address)` + `relayer_policy(impl Into<...>)` (default
+  `AllowAll`). When relayer+forwarder are set: build a second `TransactionManager` +
+  `AccountExecutor` bound to the relayer account (its own policy), wire the `SelfRelay` adapter
+  over the relayer manager, and make `Wallet::tick()` drive **both** executors. `Wallet::send_gasless(
+  intent, impl Into<GaslessOpts>)`: `build_and_sign_forward_request` on the **user** manager
+  (Step 1) → hand `SignedRequest` to `relay.relay()`. No relayer/forwarder configured ⇒ clean
+  `WalletKitError` (never a panic), **before** any signing.
 - [ ] **Tests (regression-worthy only):** `self-relay-composes-private` (`SelfRelay::via(
-  Flashbots..)` → the outer tx records the private channel); `send_gasless-without-relayer`
-  errors cleanly pre-sign; **anvil confirm-parity** — deploy an OZ `ERC2771Forwarder` + a
-  trivial 2771 target, self-relay a real `execute`, assert `Confirmed` and the target saw the
-  user as `_msgSender`; extend with `FaultRpc` for reorg → no false `Confirmed`.
-- [ ] **Phase close:** gate + rustdoc gate · learning article (relayer-vs-user key separation,
-  reusing the send pipeline as the relay backend, gasless⊕private-route composition, hermetic
-  forwarder testing on anvil) · report · stop uncommitted.
+  Flashbots..)` → the outer tx records the private channel on the **relayer** handle);
+  `send_gasless-without-relayer` errors cleanly pre-sign; **two executors both tick** (a
+  configured `Wallet` advances the relayer's pending outer tx); **anvil confirm-parity** — deploy
+  an OZ `ERC2771Forwarder` + a trivial 2771 target, self-relay a real `execute`, assert
+  `Confirmed` and the target saw the **user** as `_msgSender`; extend with `FaultRpc` for
+  reorg → no false `Confirmed`. Also `execute-revert → Failed` (inner revert reverts the outer
+  tx; H settles it `Failed`, never `Confirmed`).
+- [ ] **Phase close:** gate + rustdoc gate · learning article (relayer-as-second-operated-account,
+  the payer/authorizer split, running two per-account executors in one `tick`, gasless⊕private-route
+  composition, hermetic forwarder testing on anvil) · report · **standards refactor+review pass** ·
+  stop uncommitted.
 
 ## Phase 3 — Managed Gelato + proof + docs (PR close)
 
