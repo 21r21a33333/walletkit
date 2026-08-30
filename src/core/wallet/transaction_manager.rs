@@ -260,6 +260,16 @@ impl TransactionManager {
     /// signing a tx: the user authorizes (and pays nothing), but never sends — a relayer does.
     /// `deadline` is the validity window from now. Returns `WalletKitError` because it fuses two
     /// domains: the forwarder read ([`RelayError`]) and the signing gate ([`TransactionManagerError`]).
+    /// `skip_all` keeps the request payload out of telemetry; only correlating identifiers are recorded.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "wallet.gasless.build",
+            level = "debug",
+            skip_all,
+            fields(intent_hash = ?intent.hash(), account = %intent.account, forwarder = %forwarder, chain_id = intent.chain_id)
+        )
+    )]
     pub(crate) async fn build_and_sign_forward_request(
         &self,
         intent: &TxIntent,
