@@ -41,3 +41,43 @@ Deployed (runtime) bytecode of the canonical Multicall3, injected at
 `Localnet::deploy_multicall3` — anvil does not predeploy it, but real chains have it via
 keyless deploy. Verbatim copy of alloy's `MULTICALL3_DEPLOYED_CODE` constant
 (`alloy-provider`), which matches the on-chain Multicall3.
+
+## `erc2771_forwarder.bin` / `erc2771_target.bin`
+
+Creation bytecode of the **real** OpenZeppelin `ERC2771Forwarder` (v5.1.0) and a trivial
+ERC-2771 target, for the gasless meta-tx confirm-parity suite (`tests/gasless.rs`). Using the
+genuine OZ forwarder is the point: only its on-chain `ECDSA.recover` can prove walletkit signs
+the `ForwardRequest` in the exact 65-byte `r‖s‖v` form (v ∈ {27, 28}) the forwarder expects.
+
+- `erc2771_forwarder.bin` — a no-arg subclass `Forwarder is ERC2771Forwarder` constructed with
+  name `"ERC2771Forwarder"` (EIP-712 version `"1"`), matching `ForwarderDomain::default()`. The
+  no-arg constructor keeps the committed creation code self-contained (no appended args);
+  `Localnet::deploy_erc2771_forwarder` deploys it verbatim.
+- `erc2771_target.bin` — `RecordingTarget is ERC2771Context`: `poke()` records the ERC-2771
+  `_msgSender()` and bumps `pokes`; `boom()` reverts. Its constructor takes the forwarder
+  address, so `Localnet::deploy_erc2771_target` appends the 32-byte-padded forwarder to the
+  creation code.
+
+Regenerate with `solc 0.8.30` via a scratch Foundry project:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+import {ERC2771Forwarder} from "openzeppelin-contracts/contracts/metatx/ERC2771Forwarder.sol";
+import {ERC2771Context} from "openzeppelin-contracts/contracts/metatx/ERC2771Context.sol";
+
+contract Forwarder is ERC2771Forwarder {
+    constructor() ERC2771Forwarder("ERC2771Forwarder") {}
+}
+contract RecordingTarget is ERC2771Context {
+    address public lastSender;
+    uint256 public pokes;
+    constructor(address forwarder) ERC2771Context(forwarder) {}
+    function poke() external { lastSender = _msgSender(); pokes += 1; }
+    function boom() external { lastSender = _msgSender(); revert("boom"); }
+}
+```
+
+`forge install OpenZeppelin/openzeppelin-contracts@v5.1.0` then
+`forge inspect src/Fixtures.sol:Forwarder bytecode` (and `:RecordingTarget`) — take each `0x…`
+output as the `.bin`.
