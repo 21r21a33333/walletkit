@@ -259,8 +259,8 @@ impl AccountExecutor {
                 }
             }
             Ok(RelayStatus::Pending) => {} // still queued — poll again next tick
-            Err(_e) => {
-                warn!(intent_hash = ?handle.intent_hash, "relay task poll failed; will retry")
+            Err(_err) => {
+                warn!(intent_hash = ?handle.intent_hash, error = %_err, "relay task poll failed; will retry")
             }
         }
     }
